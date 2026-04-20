@@ -1,0 +1,2 @@
+[console_scripts]
+pglm = polymarket_glm.interface.cli:main
