@@ -1,0 +1,15 @@
+[Unit]
+Description=Polymarket GLM Paper Trading Simulation
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/polymarket-glm
+ExecStart=/home/ubuntu/.local/bin/uv run --project /home/ubuntu/polymarket-glm python scripts/run_simulation.py --scan-interval 120
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
