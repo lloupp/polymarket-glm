@@ -1,4 +1,4 @@
-"""Price feed — REST polling + WebSocket scaffold for real-time prices."""
+"""Price feed — REST polling + WebSocket for real-time prices."""
 from __future__ import annotations
 
 import asyncio
@@ -28,11 +28,11 @@ class PriceSnapshot(BaseModel):
 
 
 class PriceFeed:
-    """In-memory price cache with REST polling and optional WebSocket stream.
+    """In-memory price cache with REST polling and WebSocket stream.
 
     Architecture:
     - REST mode: periodically polls /book for each tracked market
-    - WS mode: subscribes to book updates via WebSocket (scaffold ready)
+    - WS mode: subscribes to book/price updates via WebSocket with auto-reconnect
     - All updates flow through update(), which maintains a dict of latest snapshots
     """
 
@@ -52,6 +52,11 @@ class PriceFeed:
         self._poll_task: asyncio.Task | None = None
         self._connected: bool = False
         self._on_update: list[Callable[[PriceSnapshot], None]] = []
+
+        # WS reconnect state
+        self._ws_reconnect_attempts: int = 0
+        self._ws_base_reconnect_delay: float = 1.0
+        self._ws_max_reconnect_delay: float = 30.0
 
     # ── Public API ──────────────────────────────────────────────
 
@@ -167,47 +172,156 @@ class PriceFeed:
                 asks.append(OrderBookLevel(price=price, size=size))
         return OrderBook(market_id=market_id, bids=bids, asks=asks)
 
-    # ── WebSocket Scaffold ──────────────────────────────────────
+    # ── WebSocket (Real Implementation) ─────────────────────────
 
     async def start_websocket(self) -> None:
         """Start WebSocket connection for real-time book updates.
 
-        NOTE: This is a scaffold. The Polymarket WS API requires
-        market-specific subscription messages. Full implementation
-        requires parsing the WS message format and reconnect logic.
+        Polymarket CLOB WS: wss://ws-subscriptions-clob.polymarket.com/ws
+
+        Subscribe format:
+            {"type": "subscribe", "markets": ["<token_id>", ...]}
+
+        Unsubscribe format:
+            {"type": "unsubscribe", "markets": ["<token_id>", ...]}
+
+        Incoming events:
+            - "book": full book snapshot with bids/asks arrays
+            - "price_change": price tick with single price field
         """
         self._connected = True
-        self._ws_task = asyncio.create_task(self._ws_loop())
-        logger.info("PriceFeed WebSocket started (scaffold)")
+        self._ws_task = asyncio.create_task(self._ws_main_loop())
+        logger.info("PriceFeed WebSocket started")
 
-    async def _ws_loop(self) -> None:
-        """WebSocket main loop — scaffold for future implementation."""
+    async def _ws_main_loop(self) -> None:
+        """WebSocket main loop with auto-reconnect and exponential backoff."""
         try:
-            # TODO: Implement with websockets library
-            # async with websockets.connect(self._ws_url) as ws:
-            #     await ws.send(json.dumps({"type": "subscribe", "markets": list(self._tracked_markets)}))
-            #     while self._connected:
-            #         msg = await ws.recv()
-            #         self._handle_ws_message(msg)
-            logger.warning("WebSocket feed not yet implemented — use REST polling")
             while self._connected:
-                await asyncio.sleep(10)
+                try:
+                    import websockets
+                    async with websockets.connect(self._ws_url) as ws:
+                        await self._ws_loop_with_conn(ws)
+                        self.reset_reconnect_counter()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._ws_reconnect_attempts += 1
+                    delay = self._reconnect_delay()
+                    logger.warning(
+                        "WebSocket disconnected (%s), reconnecting in %.1fs (attempt %d)",
+                        exc, delay, self._ws_reconnect_attempts,
+                    )
+                    await asyncio.sleep(delay)
         except asyncio.CancelledError:
             pass
 
+    async def _ws_loop_with_conn(self, ws) -> None:
+        """Run the WS message loop on an already-connected websocket.
+
+        Separated for testability — tests can inject a mock ws.
+        """
+        if self._tracked_markets:
+            sub_msg = json.dumps({
+                "type": "subscribe",
+                "markets": list(self._tracked_markets),
+            })
+            await ws.send(sub_msg)
+            logger.info("WS subscribed to %d markets", len(self._tracked_markets))
+
+        async for raw_msg in ws:
+            if not self._connected:
+                break
+            self._handle_ws_message(raw_msg)
+
+    def _reconnect_delay(self) -> float:
+        """Exponential backoff: base * 2^attempt, capped at max."""
+        delay = self._ws_base_reconnect_delay * (2 ** self._ws_reconnect_attempts)
+        return min(delay, self._ws_max_reconnect_delay)
+
+    def reset_reconnect_counter(self) -> None:
+        """Reset reconnect attempt counter after a successful connection."""
+        self._ws_reconnect_attempts = 0
+
     def _handle_ws_message(self, raw: str) -> None:
-        """Parse a WebSocket message and update cache."""
+        """Parse a WebSocket message and update cache.
+
+        Polymarket CLOB WS message formats:
+
+        1. Book snapshot:
+           {
+               "event_type": "book",
+               "asset_id": "<token_id>",
+               "market": "<token_id>",
+               "bids": [{"price": "0.55", "size": "100"}, ...],
+               "asks": [{"price": "0.60", "size": "50"}, ...],
+               "hash": "...",
+               "timestamp": "..."
+           }
+
+        2. Price change tick:
+           {
+               "event_type": "price_change",
+               "asset_id": "<token_id>",
+               "price": "0.72",
+               "timestamp": "..."
+           }
+
+        3. Trade event:
+           {
+               "event_type": "trade",
+               "asset_id": "<token_id>",
+               "price": "0.55",
+               "size": "100",
+               "side": "BUY",
+               "timestamp": "..."
+           }
+
+        4. Subscription confirmation:
+           {"type": "subscribe", "status": "ok", ...}
+        """
         try:
             data = json.loads(raw)
-            # TODO: Parse actual Polymarket WS message format
-            event_type = data.get("type", "")
-            if event_type == "book":
-                market_id = data.get("market", "")
-                price = float(data.get("price", 0))
-                if market_id and price:
-                    self.update(PriceSnapshot(
-                        market_id=market_id,
-                        price=price,
-                    ))
-        except (json.JSONDecodeError, ValueError, KeyError) as exc:
-            logger.debug("WS message parse error: %s", exc)
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("WS: invalid JSON message")
+            return
+
+        event_type = data.get("event_type", data.get("type", ""))
+
+        # ── Book snapshot ──
+        if event_type == "book":
+            market_id = data.get("asset_id") or data.get("market", "")
+            if not market_id:
+                return
+            bids = data.get("bids", [])
+            asks = data.get("asks", [])
+            best_bid = max((float(b["price"]) for b in bids if "price" in b), default=0)
+            best_ask = min((float(a["price"]) for a in asks if "price" in a), default=0)
+            if best_bid > 0 and best_ask > 0 and best_bid < best_ask:
+                mid = (best_bid + best_ask) / 2
+                self.update(PriceSnapshot(market_id=market_id, price=mid))
+            elif best_bid > 0:
+                self.update(PriceSnapshot(market_id=market_id, price=best_bid))
+            elif best_ask > 0:
+                self.update(PriceSnapshot(market_id=market_id, price=best_ask))
+
+        # ── Price change tick ──
+        elif event_type == "price_change":
+            market_id = data.get("asset_id", "")
+            price_str = data.get("price", "0")
+            if market_id and price_str:
+                price = float(price_str)
+                if 0 < price <= 1:
+                    self.update(PriceSnapshot(market_id=market_id, price=price))
+
+        # ── Trade event ──
+        elif event_type == "trade":
+            market_id = data.get("asset_id", "")
+            price_str = data.get("price", "0")
+            if market_id and price_str:
+                price = float(price_str)
+                if 0 < price <= 1:
+                    self.update(PriceSnapshot(market_id=market_id, price=price))
+
+        # ── Subscription confirmation or unknown ──
+        else:
+            logger.debug("WS: unhandled event_type=%s", event_type)
