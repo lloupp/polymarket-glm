@@ -12,14 +12,14 @@ class ExecutionMode(str, enum.Enum):
 
 
 class RiskConfig(BaseModel):
-    max_total_exposure_usd: float = Field(default=1500.0, gt=0)
-    max_per_market_exposure_usd: float = Field(default=1000.0, gt=0)
-    max_per_trade_usd: float = Field(default=500.0, gt=0)
-    daily_loss_limit_usd: float = Field(default=200.0, gt=0)
-    drawdown_circuit_breaker_pct: float = Field(default=0.20, gt=0, lt=1)
-    kill_switch_cooldown_sec: float = Field(default=900.0, gt=0)
-    drawdown_arm_period_sec: float = Field(default=1800.0, gt=0)
-    drawdown_min_observations: int = Field(default=3, ge=1)
+ max_total_exposure_usd: float = Field(default=500.0, gt=0)
+ max_per_market_exposure_usd: float = Field(default=200.0, gt=0)
+ max_per_trade_usd: float = Field(default=50.0, gt=0)
+ daily_loss_limit_usd: float = Field(default=30.0, gt=0)
+ drawdown_circuit_breaker_pct: float = Field(default=0.10, gt=0, lt=1)
+ kill_switch_cooldown_sec: float = Field(default=900.0, gt=0)
+ drawdown_arm_period_sec: float = Field(default=1800.0, gt=0)
+ drawdown_min_observations: int = Field(default=3, ge=1)
 
 
 class ClobConfig(BaseModel):

@@ -15,13 +15,13 @@ def test_verdict_values():
 
 
 def test_allow_within_limits():
-    rc = RiskController(RiskConfig(max_per_trade_usd=500, max_total_exposure_usd=1500, max_per_market_exposure_usd=1000))
-    verdict, reason = rc.check(market_id="m1", outcome="Yes", trade_usd=200)
+    rc = RiskController(RiskConfig(max_per_trade_usd=50, max_total_exposure_usd=500, max_per_market_exposure_usd=200))
+    verdict, reason = rc.check(market_id="m1", outcome="Yes", trade_usd=30)
     assert verdict == RiskVerdict.ALLOW
 
 
 def test_deny_per_trade():
-    rc = RiskController(RiskConfig(max_per_trade_usd=500))
+    rc = RiskController(RiskConfig(max_per_trade_usd=50))
     verdict, reason = rc.check(market_id="m1", outcome="Yes", trade_usd=600)
     assert verdict == RiskVerdict.DENY_PER_TRADE
 
@@ -36,14 +36,14 @@ def test_deny_total_exposure():
 
 
 def test_deny_market_limit():
-    rc = RiskController(RiskConfig(max_per_market_exposure_usd=500, max_per_trade_usd=500))
+    rc = RiskController(RiskConfig(max_per_market_exposure_usd=500, max_per_trade_usd=500, max_total_exposure_usd=5000))
     rc.record_fill(market_id="m1", outcome="Yes", usd=400)
     verdict, reason = rc.check(market_id="m1", outcome="Yes", trade_usd=200)
     assert verdict == RiskVerdict.DENY_MARKET_LIMIT
 
 
 def test_deny_daily_loss():
-    rc = RiskController(RiskConfig(daily_loss_limit_usd=100, max_per_trade_usd=500))
+    rc = RiskController(RiskConfig(daily_loss_limit_usd=100, max_per_trade_usd=50))
     rc.record_loss(120.0)
     verdict, reason = rc.check(market_id="m1", outcome="Yes", trade_usd=50)
     assert verdict == RiskVerdict.DENY_DAILY_LIMIT
@@ -58,7 +58,7 @@ def test_kill_switch_manual():
 
 def test_kill_switch_auto_drawdown():
     rc = RiskController(RiskConfig(
-        drawdown_circuit_breaker_pct=0.20,
+        drawdown_circuit_breaker_pct=0.10,
         drawdown_arm_period_sec=0.01,  # minimal arm period for test
         drawdown_min_observations=3,
     ))

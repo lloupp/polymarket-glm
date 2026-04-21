@@ -7,8 +7,8 @@ from polymarket_glm.config import Settings, ExecutionMode, RiskConfig
 def test_default_settings():
     s = Settings()
     assert s.execution_mode == ExecutionMode.PAPER
-    assert s.risk.max_total_exposure_usd == 1500.0
-    assert s.risk.max_per_market_exposure_usd == 1000.0
+    assert s.risk.max_total_exposure_usd == 500.0
+    assert s.risk.max_per_market_exposure_usd == 200.0
 
 
 def test_env_override():

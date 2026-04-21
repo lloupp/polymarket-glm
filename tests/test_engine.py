@@ -39,7 +39,11 @@ def test_engine_risk_controller():
 
 
 def test_engine_process_signal_paper():
-    settings = Settings(execution_mode=ExecutionMode.PAPER, paper_balance_usd=5000.0)
+    settings = Settings(
+        execution_mode=ExecutionMode.PAPER,
+        paper_balance_usd=5000.0,
+        risk=RiskConfig(max_per_trade_usd=500.0),
+    )
     engine = Engine(settings)
     from polymarket_glm.strategy.signal_engine import Signal, SignalType
     sig = Signal(
