@@ -5,6 +5,11 @@ import enum
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from polymarket_glm.strategy.context_fetcher import (
+    NewsFetcherConfig,
+    WebSearcherConfig,
+)
+
 
 class ExecutionMode(str, enum.Enum):
     PAPER = "paper"
@@ -89,6 +94,8 @@ class Settings(BaseSettings):
     risk: RiskConfig = RiskConfig()
     clob: ClobConfig = ClobConfig()
     llm_router: LLMRouterConfig = LLMRouterConfig()
+    news_fetcher: NewsFetcherConfig = NewsFetcherConfig()
+    web_searcher: WebSearcherConfig = WebSearcherConfig()
     paper_balance_usd: float = Field(default=10_000.0, gt=0)
     log_level: str = Field(default="INFO")
     telegram_alert_chat_id: str = ""

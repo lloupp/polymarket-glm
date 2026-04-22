@@ -26,6 +26,7 @@ from polymarket_glm.ingestion.market_fetcher import MarketFetcher, MarketFilter
 from polymarket_glm.ingestion.price_feed import PriceFeed
 from polymarket_glm.strategy.signal_engine import SignalEngine, SignalType
 from polymarket_glm.strategy.llm_router import LLMRouter, LLMRouterConfig as RouterConfig, LLMProviderConfig
+from polymarket_glm.strategy.context_fetcher import ContextBuilder, ContextBuilderConfig
 from polymarket_glm.risk.controller import RiskController, RiskVerdict
 from polymarket_glm.execution.paper_executor import PaperExecutor
 from polymarket_glm.execution.exchange import OrderRequest
@@ -114,7 +115,26 @@ class SimulationEngine:
         else:
             logger.info("📊 LLM Router disabled — using Gaussian noise estimator")
 
-        # Market filter: active, non-sports, decent volume
+        # Context Builder (News + Web Search for Superforecaster)
+        context_cfg = ContextBuilderConfig(
+            news_fetcher=settings.news_fetcher,
+            web_searcher=settings.web_searcher,
+        )
+        self._context_builder = ContextBuilder(context_cfg)
+        if self._context_builder.has_any_source:
+            sources = []
+            if settings.news_fetcher.api_key:
+                sources.append("NewsAPI")
+            if settings.web_searcher.api_key:
+                sources.append("Tavily")
+            logger.info(
+                "📡 Context Builder enabled: %s",
+                " + ".join(sources),
+            )
+        else:
+            logger.info("📡 Context Builder disabled — no news/search API keys")
+
+    # Market filter: active, non-sports, decent volume
         self._market_filter = MarketFilter(
             active_only=True,
             exclude_sports=True,
@@ -383,9 +403,24 @@ class SimulationEngine:
                 volume=market.volume,
                 spread=market.spread,
                 current_price=market.outcome_prices[0] if market.outcome_prices else 0.5,
-                category=market.category or "",
+                category=getattr(market, "category", "") or "",
             )
-            estimate = await self._llm_router.estimate(mi)
+
+            # Fetch news/search context for the Superforecaster prompt
+            news_context = ""
+            if self._context_builder.has_any_source:
+                try:
+                    news_context = await self._context_builder.fetch_context(market.question)
+                    if news_context:
+                        logger.debug(
+                            "📡 Context fetched (%d chars) for: %s",
+                            len(news_context),
+                            market.question[:50],
+                        )
+                except Exception as exc:
+                    logger.debug("Context fetch failed for %s: %s", market.question[:30], exc)
+
+            estimate = await self._llm_router.estimate(mi, news_context=news_context)
             estimated_prob = estimate.probability
             logger.debug(
                 "🧠 LLM estimate: %.2f (confidence=%.2f, source=%s) — %s",
