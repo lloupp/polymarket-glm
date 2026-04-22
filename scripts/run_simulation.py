@@ -25,6 +25,7 @@ from polymarket_glm.config import Settings, ExecutionMode
 from polymarket_glm.ingestion.market_fetcher import MarketFetcher, MarketFilter
 from polymarket_glm.ingestion.price_feed import PriceFeed
 from polymarket_glm.strategy.signal_engine import SignalEngine, SignalType
+from polymarket_glm.strategy.llm_router import LLMRouter, LLMRouterConfig as RouterConfig, LLMProviderConfig
 from polymarket_glm.risk.controller import RiskController, RiskVerdict
 from polymarket_glm.execution.paper_executor import PaperExecutor
 from polymarket_glm.execution.exchange import OrderRequest
@@ -59,6 +60,59 @@ class SimulationEngine:
         )
         self._risk = RiskController(config=settings.risk)
         self._executor = PaperExecutor(initial_balance=settings.paper_balance_usd)
+
+        # LLM Router (replaces Gaussian noise estimator)
+        self._llm_router: LLMRouter | None = None
+        self._use_llm = False
+        llm_cfg = settings.llm_router
+        if llm_cfg.enabled and llm_cfg.active_providers > 0:
+            providers = []
+            if llm_cfg.groq_api_key:
+                providers.append(LLMProviderConfig(
+                    name="groq", base_url=llm_cfg.groq_base_url,
+                    model=llm_cfg.groq_model, rpm=llm_cfg.groq_rpm,
+                    api_key=llm_cfg.groq_api_key, priority=1,
+                ))
+            if llm_cfg.gemini_api_key:
+                providers.append(LLMProviderConfig(
+                    name="gemini", base_url=llm_cfg.gemini_base_url,
+                    model=llm_cfg.gemini_model, rpm=llm_cfg.gemini_rpm,
+                    api_key=llm_cfg.gemini_api_key, priority=2,
+                ))
+            if llm_cfg.github_api_key:
+                providers.append(LLMProviderConfig(
+                    name="github", base_url=llm_cfg.github_base_url,
+                    model=llm_cfg.github_model, rpm=llm_cfg.github_rpm,
+                    api_key=llm_cfg.github_api_key, priority=3,
+                ))
+            if llm_cfg.cerebras_api_key:
+                providers.append(LLMProviderConfig(
+                    name="cerebras", base_url=llm_cfg.cerebras_base_url,
+                    model=llm_cfg.cerebras_model, rpm=llm_cfg.cerebras_rpm,
+                    api_key=llm_cfg.cerebras_api_key, priority=4,
+                ))
+            if llm_cfg.mistral_api_key:
+                providers.append(LLMProviderConfig(
+                    name="mistral", base_url=llm_cfg.mistral_base_url,
+                    model=llm_cfg.mistral_model, rpm=llm_cfg.mistral_rpm,
+                    api_key=llm_cfg.mistral_api_key, priority=5,
+                ))
+
+            self._llm_router = LLMRouter(RouterConfig(
+                providers=providers,
+                max_retries_per_provider=llm_cfg.max_retries_per_provider,
+                timeout_sec=llm_cfg.timeout_sec,
+                temperature=llm_cfg.temperature,
+                max_tokens=llm_cfg.max_tokens,
+            ))
+            self._use_llm = True
+            logger.info(
+                "🧠 LLM Router enabled: %d providers (%s)",
+                len(providers),
+                ", ".join(p.name for p in providers),
+            )
+        else:
+            logger.info("📊 LLM Router disabled — using Gaussian noise estimator")
 
         # Market filter: active, non-sports, decent volume
         self._market_filter = MarketFilter(
@@ -321,14 +375,29 @@ class SimulationEngine:
             return None
 
         # ── Estimator ──
-        # Simulation mode: perturb market-implied probability with random noise
-        # to simulate a realistic estimator that sometimes finds edge.
-        # In production, this would be GLMEstimator / EnsembleEstimator.
-        import random
-        base_prob = market.outcome_prices[0] if market.outcome_prices else 0.5
-        # Add mean-reverting noise: ±3-8% random deviation
-        noise = random.gauss(0, 0.05)  # mean=0, std=5%
-        estimated_prob = max(0.01, min(0.99, base_prob + noise))
+        # Use LLM Router if available, otherwise fall back to Gaussian noise
+        if self._use_llm and self._llm_router:
+            from polymarket_glm.strategy.estimator import MarketInfo
+            mi = MarketInfo(
+                question=market.question,
+                volume=market.volume,
+                spread=market.spread,
+                current_price=market.outcome_prices[0] if market.outcome_prices else 0.5,
+                category=market.category or "",
+            )
+            estimate = await self._llm_router.estimate(mi)
+            estimated_prob = estimate.probability
+            logger.debug(
+                "🧠 LLM estimate: %.2f (confidence=%.2f, source=%s) — %s",
+                estimated_prob, estimate.confidence, estimate.source,
+                market.question[:50],
+            )
+        else:
+            # Fallback: Gaussian noise estimator (for testing without LLM keys)
+            import random
+            base_prob = market.outcome_prices[0] if market.outcome_prices else 0.5
+            noise = random.gauss(0, 0.05)
+            estimated_prob = max(0.01, min(0.99, base_prob + noise))
 
         # Generate signal
         signal = self._signal_engine.generate_signal(
