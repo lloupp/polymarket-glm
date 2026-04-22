@@ -367,7 +367,7 @@ class SimulationEngine:
                     signals_this_round += 1
                     rejections_this_round += 1
             except Exception as exc:
-                logger.debug("Error processing %s: %s", market.market_id, exc)
+                logger.warning("Error processing %s: %s", market.market_id, exc)
 
         self._total_signals += signals_this_round
         self._total_fills += fills_this_round
@@ -388,12 +388,12 @@ class SimulationEngine:
         # Fetch order book using the FULL CLOB token ID (not the short numeric market_id)
         token_id = market.tokens[0] if market.tokens else None
         if not token_id:
+            logger.info("⏭ Skip %s: no token_id", market.question[:40])
             return None
-
         book = await self._price_feed.fetch_book(token_id)
         if book is None or not book.bids or not book.asks:
+            logger.info("⏭ Skip %s: no order book", market.question[:40])
             return None
-
         # ── Estimator ──
         # Use LLM Router if available, otherwise fall back to Gaussian noise
         if self._use_llm and self._llm_router:
@@ -401,11 +401,10 @@ class SimulationEngine:
             mi = MarketInfo(
                 question=market.question,
                 volume=market.volume,
-                spread=market.spread,
+                spread=market.spread_bps / 10_000 if hasattr(market, 'spread_bps') else 0.05,
                 current_price=market.outcome_prices[0] if market.outcome_prices else 0.5,
                 category=getattr(market, "category", "") or "",
             )
-
             # Fetch news/search context for the Superforecaster prompt
             news_context = ""
             if self._context_builder.has_any_source:
@@ -419,7 +418,6 @@ class SimulationEngine:
                         )
                 except Exception as exc:
                     logger.debug("Context fetch failed for %s: %s", market.question[:30], exc)
-
             estimate = await self._llm_router.estimate(mi, news_context=news_context)
             estimated_prob = estimate.probability
             logger.info(
@@ -433,7 +431,6 @@ class SimulationEngine:
             base_prob = market.outcome_prices[0] if market.outcome_prices else 0.5
             noise = random.gauss(0, 0.05)
             estimated_prob = max(0.01, min(0.99, base_prob + noise))
-
         # Generate signal
         signal = self._signal_engine.generate_signal(
             market=market,
@@ -441,10 +438,8 @@ class SimulationEngine:
             estimated_prob=estimated_prob,
             balance_usd=self._executor.account.balance_usd,
         )
-
         if signal is None:
             return None  # no edge
-
         logger.info(
             "📈 Signal: %s %s edge=%.4f size=$%.2f",
             signal.signal_type.value,
@@ -452,48 +447,54 @@ class SimulationEngine:
             signal.edge,
             signal.size_usd,
         )
-
         # Risk check
         verdict, reason = self._risk.check(
             market_id=signal.market_id,
             outcome=signal.outcome,
             trade_usd=signal.size_usd,
         )
-
         if verdict != RiskVerdict.ALLOW:
             logger.info("⛔ Risk rejected: %s (%s)", verdict.value, reason)
             return "rejected"
+                # Execute (paper)
+            # In Polymarket, SELL YES without position = BUY NO instead
+            if signal.signal_type == SignalType.SELL:
+                side = Side.BUY
+                outcome = "No"
+                price = 1.0 - signal.market_price
+            else:
+                side = Side.BUY
+                outcome = signal.outcome
+                price = signal.market_price
 
-        # Execute (paper)
-        side = Side.BUY if signal.signal_type == SignalType.BUY else Side.SELL
-        order = OrderRequest(
-            market_id=signal.market_id,
-            side=side,
-            outcome=signal.outcome,
-            price=signal.market_price,
-            size=signal.size_usd / signal.market_price if signal.market_price > 0 else 0,
-        )
-
-        fill = await self._executor.submit_order(order)
-
-        if fill.filled:
-            self._risk.record_fill(signal.market_id, signal.outcome, signal.size_usd)
-            logger.info(
-                "✅ Filled: %s %s $%.2f @ %.4f",
-                side.value, signal.outcome, signal.size_usd, signal.market_price,
+            order = OrderRequest(
+                market_id=signal.market_id,
+                side=side,
+                outcome=outcome,
+                price=price,
+                size=signal.size_usd / price if price > 0 else 0,
             )
 
-            # Alert for fills
-            if self._total_fills <= 5 or self._total_fills % 10 == 0:
-                await self._send_alert(
-                    "Trade Filled",
-                    f"{side.value.upper()} {signal.outcome} ${signal.size_usd:.2f} @ {signal.market_price:.4f}\n{market.question[:80]}",
-                    "info",
+            fill = await self._executor.submit_order(order)
+
+            if fill.filled:
+                self._risk.record_fill(signal.market_id, signal.outcome, signal.size_usd)
+                logger.info(
+                    "✅ Filled: %s %s $%.2f @ %.4f",
+                    side.value, signal.outcome, signal.size_usd, signal.market_price,
                 )
-            return "filled"
-        else:
-            logger.info("❌ Fill failed: %s", fill.reason)
-            return "signal"
+
+                # Alert for fills
+                if self._total_fills <= 5 or self._total_fills % 10 == 0:
+                    await self._send_alert(
+                        "Trade Filled",
+                        f"{side.value.upper()} {signal.outcome} ${signal.size_usd:.2f} @ {signal.market_price:.4f}\n{market.question[:80]}",
+                        "info",
+                    )
+                return "filled"
+            else:
+                logger.info("❌ Fill failed: %s", fill.reason)
+                return "signal"
 
     async def _shutdown(self) -> None:
         """Graceful shutdown."""
