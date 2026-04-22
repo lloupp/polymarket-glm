@@ -16,6 +16,7 @@ import logging
 import signal
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -33,6 +34,7 @@ from polymarket_glm.execution.exchange import OrderRequest
 from polymarket_glm.execution.portfolio_tracker import PortfolioTracker
 from polymarket_glm.execution.settlement_tracker import SettlementTracker
 from polymarket_glm.monitoring.alerts import AlertManager, Alert, AlertLevel
+from polymarket_glm.monitoring.daily_report import format_daily_report, format_pnl_alert
 from polymarket_glm.ops.telegram_bot import TelegramBot
 from polymarket_glm.ops.health import HealthCheck, check_loop_health
 from polymarket_glm.models import Side
@@ -169,6 +171,7 @@ class SimulationEngine:
 
         # State
         self._iteration = 0
+        self._last_report_date: str = ""  # track daily report sending
         self._total_signals = 0
         self._total_fills = 0
         self._total_rejections = 0
@@ -442,6 +445,29 @@ class SimulationEngine:
                 summary.num_open_positions,
                 summary.balance_usd,
             )
+
+        # P&L alert (if significant move)
+        if self._bot and summary.num_open_positions > 0:
+            alert_msg = format_pnl_alert(summary, threshold_pct=5.0)
+            if alert_msg:
+                await self._bot.send_message(alert_msg)
+
+        # Daily report at 20:00 UTC
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        hour = datetime.utcnow().hour
+        if hour >= 20 and self._last_report_date != today and self._bot:
+            report = format_daily_report(
+                portfolio=summary,
+                settlement=self._settlement,
+                total_trades=self._total_fills,
+                total_signals=self._total_signals,
+                total_rejections=self._total_rejections,
+                daily_loss_limit=self._settings.risk.daily_loss_limit_usd,
+                kill_switch_active=self._risk._kill_switch_active,
+            )
+            await self._bot.send_message(report)
+            self._last_report_date = today
+            logger.info("📋 Daily report sent")
 
     async def _process_market(self, market) -> str | None:
         """Process a single market: fetch book → estimate → signal → risk → execute."""
