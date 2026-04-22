@@ -31,6 +31,7 @@ from polymarket_glm.risk.controller import RiskController, RiskVerdict
 from polymarket_glm.execution.paper_executor import PaperExecutor
 from polymarket_glm.execution.exchange import OrderRequest
 from polymarket_glm.execution.portfolio_tracker import PortfolioTracker
+from polymarket_glm.execution.settlement_tracker import SettlementTracker
 from polymarket_glm.monitoring.alerts import AlertManager, Alert, AlertLevel
 from polymarket_glm.ops.telegram_bot import TelegramBot
 from polymarket_glm.ops.health import HealthCheck, check_loop_health
@@ -63,6 +64,7 @@ class SimulationEngine:
         self._risk = RiskController(config=settings.risk)
         self._executor = PaperExecutor(initial_balance=settings.paper_balance_usd)
         self._portfolio = PortfolioTracker()
+        self._settlement = SettlementTracker()
 
         # LLM Router (replaces Gaussian noise estimator)
         self._llm_router: LLMRouter | None = None
@@ -399,6 +401,31 @@ class SimulationEngine:
         # Update balance for drawdown check
         acct = self._executor.account
         self._risk.update_balance(acct.balance_usd)
+
+        # Settlement check: detect resolved markets
+        resolved = {m.market_id: m.outcomes[0] for m in markets if getattr(m, "closed", False)}
+        if resolved and acct.positions:
+            settlement_summary = self._settlement.check_settlements(
+                positions=acct.positions,
+                resolved_markets=resolved,
+            )
+            if settlement_summary.num_settled > 0:
+                # Credit settlement proceeds to balance
+                for s in settlement_summary.settlements:
+                    self._executor._balance += s.proceeds
+                    # Remove settled position
+                    mp = self._executor._positions.get(s.market_id)
+                    if mp and s.outcome in mp:
+                        del mp[s.outcome]
+                        if not mp:
+                            del self._executor._positions[s.market_id]
+                logger.info(
+                    "🏛️ Settled %d markets: realized P&L=$%.2f",
+                    settlement_summary.num_settled,
+                    settlement_summary.total_realized_pnl,
+                )
+                # Refresh account after settlements
+                acct = self._executor.account
 
         # Mark-to-market P&L update
         price_lookup = {m.market_id: m.outcome_prices[0] for m in markets if m.outcome_prices}
