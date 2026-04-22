@@ -106,17 +106,34 @@ class SignalEngine:
         book: OrderBook,
         estimated_prob: float,
         balance_usd: float = 10_000.0,
+        open_market_ids: set[str] | None = None,
     ) -> Signal | None:
         """Generate a signal from market data and estimated probability.
 
-        Returns None if edge is below threshold.
+        Returns None if edge is below threshold or position already open.
         """
+        # Dedup: skip if we already have a position in this market
+        if open_market_ids and market.market_id in open_market_ids:
+            logger.debug("Skipping %s — position already open", market.market_id)
+            return None
+
         # Use midpoint or best ask as reference price
         market_price = book.midpoint if book.midpoint else (
             market.outcome_prices[0] if market.outcome_prices else 0.5
         )
 
         edge = self.calculate_edge(market_price, estimated_prob)
+
+        # Clamp edge to max 30% — extreme edges are usually LLM hallucination
+        MAX_EDGE = 0.30
+        if abs(edge) > MAX_EDGE:
+            logger.info(
+                "Edge %.4f clamped to %.2f for %s",
+                edge, MAX_EDGE if edge > 0 else -MAX_EDGE, market.market_id,
+            )
+            edge = max(-MAX_EDGE, min(MAX_EDGE, edge))
+            # Re-derive estimated_prob from clamped edge for correct Kelly sizing
+            estimated_prob = market_price + edge
 
         # Check minimum edge
         if abs(edge) < self._min_edge:

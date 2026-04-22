@@ -14,13 +14,14 @@ logger = logging.getLogger(__name__)
 
 GAMMA_URL = "https://gamma-api.polymarket.com"
 
-# Keywords that indicate sports markets
+# Keywords that indicate sports markets (specific, not generic)
 _SPORT_KEYWORDS = frozenset({
-    "NBA", "NFL", "MLB", "NHL", "NCAAF", "NCAAB", "MLS", "Premier League",
-    "Super Bowl", "World Cup", "Olympics", "UFC", "FIFA", "F1", "Formula 1",
+    "NBA", "NFL", "MLB", "NHL", "NCAAF", "NCAAB", "MLS",
+    "Super Bowl", "FIFA World Cup", "Olympics", "UFC", "F1", "Formula 1",
+    "La Liga", "Premier League", "Champions League", "Serie A", "Bundesliga",
     "tennis", "golf", "boxing", "cricket", "rugby", "horse racing",
-    "Will the", "win the", "game", "match", "score", "points", "yards",
-    "touchdown", "home run", "goal",
+    "touchdown", "home run", "Stanley Cup",
+    "FIFA", "World Cup",
 })
 
 
@@ -71,8 +72,9 @@ class MarketFetcher:
             m = self._parse_market(raw)
             if m is not None and self._passes_filter(m, filt):
                 markets.append(m)
-            if len(markets) >= filt.max_markets:
-                break
+        # Sort by volume descending so top markets get processed first
+        markets.sort(key=lambda m: m.volume, reverse=True)
+        markets = markets[: filt.max_markets]
         logger.info("Fetched %d markets (filtered from %d raw)", len(markets), len(raw_markets))
         return markets
 
@@ -80,23 +82,38 @@ class MarketFetcher:
         self,
         tag: str | None = None,
         slug: str | None = None,
-        limit: int = 500,
+        limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """Raw HTTP call to Gamma /markets endpoint."""
+        """Raw HTTP call to Gamma /markets endpoint.
+        
+        Paginates through multiple pages to collect enough markets
+        for keyword filtering.
+        """
         client = await self._ensure_client()
-        params: dict[str, Any] = {"limit": limit, "offset": offset}
-        if tag:
-            params["tag"] = tag
-        if slug:
-            params["slug"] = slug
-        try:
-            resp = await client.get("/markets", params=params)
-            resp.raise_for_status()
-            return resp.json()
-        except httpx.HTTPError as exc:
-            logger.error("Gamma API error: %s", exc)
-            return []
+        all_results: list[dict[str, Any]] = []
+        max_pages = 5  # fetch up to 500 markets
+        
+        for page in range(max_pages):
+            params: dict[str, Any] = {"limit": limit, "offset": offset + page * limit}
+            if tag:
+                params["tag"] = tag
+            if slug:
+                params["slug"] = slug
+            try:
+                resp = await client.get("/markets", params=params)
+                resp.raise_for_status()
+                data = resp.json()
+                if not data:
+                    break
+                all_results.extend(data)
+                if len(data) < limit:
+                    break
+            except httpx.HTTPError as exc:
+                logger.error("Gamma API error: %s", exc)
+                break
+        
+        return all_results
 
     def _parse_market(self, raw: dict[str, Any]) -> Market | None:
         """Parse a raw Gamma API dict into a Market model.

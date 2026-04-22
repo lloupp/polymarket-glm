@@ -140,12 +140,26 @@ class SimulationEngine:
         else:
             logger.info("📡 Context Builder disabled — no news/search API keys")
 
-    # Market filter: active, non-sports, decent volume
+        # Market filter: focus on crypto, geopolitics, tech, economics
         self._market_filter = MarketFilter(
             active_only=True,
             exclude_sports=True,
-            min_volume_usd=1000,
-            max_markets=5,
+            min_volume_usd=50000,
+            max_markets=20,
+            keywords_include=[
+                "bitcoin", "btc", "ethereum", "eth ", "crypto", "solana",
+                "tariff", "fed", "interest rate", "recession", "gdp",
+                "inflation", "s&p", "stock", "dollar",
+                "china", "russia", "ukraine", "war", "ceasefire", "nato",
+                "ai ", "gpt", "launch", "airdrop", "market cap",
+                "regulation", "sec ", "deport", "trump tariff",
+            ],
+            keywords_exclude=[
+                "win the 2026 fifa", "win the 2026 nba", "win the 2025",
+                "la liga", "premier league", "champions league",
+                "presidential nomination", "presidential election",
+                "win the 2028", "world cup", "stanley cup",
+            ],
         )
 
         # Telegram bot for alerts
@@ -355,6 +369,10 @@ class SimulationEngine:
             except Exception:
                 await asyncio.sleep(10)
 
+    def _open_market_ids(self) -> set[str]:
+        """Return set of market_ids where we already have an open position."""
+        return {p.market_id for p in self._executor.account.positions}
+
     async def _run_iteration(self) -> None:
         """One full scan → estimate → signal → risk → execute cycle."""
         self._last_loop_time = time.time()
@@ -523,6 +541,7 @@ class SimulationEngine:
             book=book,
             estimated_prob=estimated_prob,
             balance_usd=self._executor.account.balance_usd,
+            open_market_ids=self._open_market_ids(),
         )
         if signal is None:
             return None  # no edge

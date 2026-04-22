@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     llm_router: LLMRouterConfig = LLMRouterConfig()
     news_fetcher: NewsFetcherConfig = NewsFetcherConfig()
     web_searcher: WebSearcherConfig = WebSearcherConfig()
-    paper_balance_usd: float = Field(default=10_000.0, gt=0)
+    paper_balance_usd: float = Field(default=1_000.0, gt=0)
     log_level: str = Field(default="INFO")
     telegram_alert_chat_id: str = ""
     telegram_alert_token: str = ""
