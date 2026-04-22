@@ -77,7 +77,7 @@ class SimulationEngine:
             if llm_cfg.gemini_api_key:
                 providers.append(LLMProviderConfig(
                     name="gemini", base_url=llm_cfg.gemini_base_url,
-                    model=llm_cfg.gemini_model, rpm=llm_cfg.gemini_rpm,
+                    model=llm_cfg.gemini_model, rpm=llm_cfg.gemini_rpm, rpd=llm_cfg.gemini_rpd,
                     api_key=llm_cfg.gemini_api_key, priority=2,
                 ))
             if llm_cfg.github_api_key:
@@ -139,7 +139,7 @@ class SimulationEngine:
             active_only=True,
             exclude_sports=True,
             min_volume_usd=1000,
-            max_markets=50,
+            max_markets=5,
         )
 
         # Telegram bot for alerts

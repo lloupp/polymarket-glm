@@ -157,13 +157,13 @@ DEFAULT_PROVIDERS = {
         "rpd": 14400,
         "priority": 1,
     },
-    "gemini": {
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-        "model": "gemini-2.5-flash",
-        "rpm": 10,
-        "rpd": 250,
-        "priority": 2,
-    },
+ "gemini": {
+ "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+ "model": "gemini-2.5-flash",
+ "rpm": 10,
+ "rpd": 20,
+ "priority": 2,
+ },
     "github": {
         "base_url": "https://models.github.ai/inference",
         "model": "gpt-4.1-mini",

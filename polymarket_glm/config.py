@@ -50,6 +50,7 @@ class LLMRouterConfig(BaseModel):
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     gemini_model: str = "gemini-2.5-flash"
     gemini_rpm: int = 10
+    gemini_rpd: int = 20
 
     github_api_key: str = ""
     github_base_url: str = "https://models.github.ai/inference"
