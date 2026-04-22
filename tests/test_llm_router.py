@@ -59,7 +59,7 @@ class TestLLMRouterConfig:
         assert cfg.max_retries_per_provider == 2
         assert cfg.timeout_sec == 30.0
         assert cfg.temperature == 0.3
-        assert cfg.max_tokens == 300
+        assert cfg.max_tokens == 500
 
     def test_with_providers(self):
         from polymarket_glm.strategy.llm_router import LLMProviderConfig, LLMRouterConfig
@@ -286,3 +286,21 @@ class TestParseProbability:
         from polymarket_glm.strategy.llm_router import parse_llm_probability
         assert parse_llm_probability("0%") == 0.0
         assert parse_llm_probability("100%") == 1.0
+
+    def test_estimate_format_priority(self):
+        from polymarket_glm.strategy.llm_router import parse_llm_probability
+        # ESTIMATE: format should be highest priority even if other % exist
+        text = "Base rate is around 50%. Based on recent events.\nESTIMATE: 35%"
+        assert parse_llm_probability(text) == 0.35
+
+    def test_estimate_format_no_percent_sign(self):
+        from polymarket_glm.strategy.llm_router import parse_llm_probability
+        # Without % sign, ESTIMATE should still be parsed by pattern 1
+        text = "Some reasoning here.\nESTIMATE: 42%"
+        assert parse_llm_probability(text) == 0.42
+
+    def test_last_occurrence_preferred(self):
+        from polymarket_glm.strategy.llm_router import parse_llm_probability
+        # Should pick last likelihood, not first
+        text = "likelihood 25% based on market.\nBut after analysis, likelihood 40%."
+        assert parse_llm_probability(text) == 0.40

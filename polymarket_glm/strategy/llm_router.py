@@ -26,45 +26,22 @@ logger = logging.getLogger(__name__)
 # ── Superforecaster Prompt (adapted from Polymarket/agents) ─────
 
 SUPERFORECASTER_SYSTEM_PROMPT = """\
-You are a Superforecaster tasked with correctly predicting the likelihood of events.
-Use the following systematic process to develop an accurate prediction:
+You are a Superforecaster. Your job is to estimate the TRUE probability of events happening.
 
-1. Breaking Down the Question:
- - Decompose the question into smaller, more manageable parts.
- - Identify the key components that need to be addressed to answer the question.
+Rules:
+1. Decompose the question and consider base rates from historical data.
+2. Adjust based on specific evidence, recent news, and current conditions.
+3. The market price is the crowd's consensus — it is NOT the truth.
+   - If evidence suggests the market is WRONG, estimate AWAY from the price.
+   - If evidence supports the market, it is fine to agree.
+4. Think in probabilities, not certainties. Avoid 0% or 100% unless truly impossible/certain.
 
-2. Gathering Information:
- - Seek out diverse sources of information.
- - Look for both quantitative data and qualitative insights.
- - Stay updated on relevant news and expert analyses.
+CRITICAL: Your response MUST end with EXACTLY this format:
+ESTIMATE: X%
 
-3. Consider Base Rates:
- - Use statistical baselines or historical averages as a starting point.
- - Compare the current situation to similar past events to establish a benchmark probability.
-
-4. Identify and Evaluate Factors:
- - List factors that could influence the outcome.
- - Assess the impact of each factor, considering both positive and negative influences.
- - Use evidence to weigh these factors, avoiding over-reliance on any single piece of information.
-
-5. Think Probabilistically:
- - Express predictions in terms of probabilities rather than certainties.
- - Assign likelihoods to different outcomes and avoid binary thinking.
- - Embrace uncertainty and recognize that all forecasts are probabilistic in nature.
-
-6. Avoid Anchoring:
- - The market price is the crowd's consensus — it is a useful reference point but NOT the truth.
- - If your analysis suggests the market is overpriced, estimate LOWER than the market price.
- - If your analysis suggests the market is underpriced, estimate HIGHER than the market price.
- - It is perfectly acceptable to agree with the market when your analysis supports it.
- - Do NOT systematically underestimate — a well-calibrated forecaster is close to the market most of the time and differs only when they have specific evidence.
-
-IMPORTANT: You must respond with your final probability estimate in this exact format on the LAST line:
-"I believe [question] has a likelihood X% for outcome of Yes."
-
-Where X is a number between 0 and 100. This is the ONLY part that will be parsed.
-Your reasoning before this statement is welcome but the FINAL LINE must contain the likelihood.
-Do NOT mention any percentage in your reasoning — only in the final line.
+Where X is your probability (0-100). No other text after ESTIMATE: X%.
+Put your reasoning BEFORE the estimate, not after.
+Do NOT use any percentages in your reasoning section — save it for the ESTIMATE line.
 """
 
 
@@ -126,6 +103,11 @@ def parse_llm_probability(text: str) -> float:
     5. Any number → last resort
     6. No match → 0.5
     """
+    # Pattern 0: "ESTIMATE: X%" — explicit final estimate (highest priority, last match)
+    est_matches = list(re.finditer(r'ESTIMATE:\s*(\d+\.?\d*)%', text, re.IGNORECASE))
+    if est_matches:
+        return float(est_matches[-1].group(1)) / 100.0
+
     # Pattern 1: "likelihood X%" or "Probability: X%" — use LAST match
     explicit = list(re.finditer(
         r'[Ll]ikelihood\s+(\d+\.?\d*)%?|[Pp]robabilit[y]?\s*[:=]?\s*(\d+\.?\d*)%?',
@@ -224,7 +206,7 @@ class LLMRouterConfig(BaseModel):
     max_retries_per_provider: int = 2
     timeout_sec: float = 30.0
     temperature: float = 0.3
-    max_tokens: int = 300
+    max_tokens: int = 500
 
 
 # ── Rate Limit Tracker ──────────────────────────────────────────
