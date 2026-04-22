@@ -58,8 +58,8 @@ class TestLLMRouterConfig:
         assert cfg.providers == []
         assert cfg.max_retries_per_provider == 2
         assert cfg.timeout_sec == 30.0
-        assert cfg.temperature == 0.1
-        assert cfg.max_tokens == 150
+        assert cfg.temperature == 0.3
+        assert cfg.max_tokens == 300
 
     def test_with_providers(self):
         from polymarket_glm.strategy.llm_router import LLMProviderConfig, LLMRouterConfig

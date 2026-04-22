@@ -52,23 +52,38 @@ Use the following systematic process to develop an accurate prediction:
  - Assign likelihoods to different outcomes and avoid binary thinking.
  - Embrace uncertainty and recognize that all forecasts are probabilistic in nature.
 
-IMPORTANT: You must respond with your final probability estimate in this exact format:
-"I believe [question] has a likelihood X% for outcome of [Yes/No]."
+6. Avoid Anchoring:
+ - The market price is the crowd's consensus — it is a useful reference point but NOT the truth.
+ - If your analysis suggests the market is overpriced, estimate LOWER than the market price.
+ - If your analysis suggests the market is underpriced, estimate HIGHER than the market price.
+ - It is perfectly acceptable to agree with the market when your analysis supports it.
+ - Do NOT systematically underestimate — a well-calibrated forecaster is close to the market most of the time and differs only when they have specific evidence.
+
+IMPORTANT: You must respond with your final probability estimate in this exact format on the LAST line:
+"I believe [question] has a likelihood X% for outcome of Yes."
 
 Where X is a number between 0 and 100. This is the ONLY part that will be parsed.
-Your reasoning before this statement is welcome but the final line must contain the likelihood.
+Your reasoning before this statement is welcome but the FINAL LINE must contain the likelihood.
+Do NOT mention any percentage in your reasoning — only in the final line.
 """
 
 
 def build_superforecaster_prompt(market: MarketInfo, news_context: str = "") -> str:
     """Build the user prompt for the superforecaster LLM call.
 
-    Includes market metadata and optional news context for informed estimation.
+    Shows the current market price but instructs the model to form an
+    independent estimate. Pure hiding causes extreme underestimation;
+    showing with anchoring instruction balances calibration.
     """
     parts = [f"Market Question: {market.question}"]
 
     if market.current_price is not None:
-        parts.append(f"Current Market Price: {market.current_price:.2f} ({market.current_price:.0%})")
+        parts.append(
+            f"Current Market Price: {market.current_price:.2f} ({market.current_price:.0%})\n"
+            "NOTE: The market price reflects the crowd's consensus. Your task is to form "
+            "an INDEPENDENT estimate. If you have information or reasoning that the crowd "
+            "is wrong, you should differ from this price. Do not simply mirror it."
+        )
 
     if market.volume > 0:
         parts.append(f"Volume: ${market.volume:,.0f}")
@@ -89,6 +104,8 @@ def build_superforecaster_prompt(market: MarketInfo, news_context: str = "") -> 
     parts.append(
         "\nBased on the systematic superforecasting process, "
         "what is the true probability of this event occurring? "
+        "Form your own independent estimate — if you believe the market "
+        "is mispriced, say so explicitly. "
         "Respond with your estimate in the format: "
         '"I believe [question] has a likelihood X% for outcome of Yes."'
     )
@@ -101,7 +118,7 @@ def build_superforecaster_prompt(market: MarketInfo, news_context: str = "") -> 
 def parse_llm_probability(text: str) -> float:
     """Parse a probability value from an LLM response.
 
-    Tries patterns in order:
+    Tries patterns in order (all using last occurrence):
     1. "likelihood X%" or "Probability: X%"
     2. Percentage "X%" or "X percent"
     3. Decimal "0.XX"
@@ -109,31 +126,31 @@ def parse_llm_probability(text: str) -> float:
     5. Any number → last resort
     6. No match → 0.5
     """
-    # Pattern 1: "likelihood X%" or "Probability: X%"
-    explicit = re.search(
+    # Pattern 1: "likelihood X%" or "Probability: X%" — use LAST match
+    explicit = list(re.finditer(
         r'[Ll]ikelihood\s+(\d+\.?\d*)%?|[Pp]robabilit[y]?\s*[:=]?\s*(\d+\.?\d*)%?',
         text,
-    )
+    ))
     if explicit:
-        for g in explicit.groups():
+        last = explicit[-1]
+        for g in last.groups():
             if g is not None:
                 val = float(g)
                 return val / 100.0 if val > 1 else val
 
-    # Pattern 2: Percentage
-    pct = re.search(r'(\d+\.?\d*)\s*(?:%|percent)', text, re.IGNORECASE)
-    if pct:
-        return float(pct.group(1)) / 100.0
+    # Pattern 2: Percentage — use LAST match
+    pcts = list(re.finditer(r'(\d+\.?\d*)\s*(?:%|percent)', text, re.IGNORECASE))
+    if pcts:
+        return float(pcts[-1].group(1)) / 100.0
 
-    # Pattern 3: Decimal 0.XX
-    dec = re.search(r'\b(0\.\d{1,4})\b', text)
-    if dec:
-        return float(dec.group(1))
+    # Pattern 3: Decimal 0.XX — use LAST match
+    decs = list(re.finditer(r'\b(0\.\d{1,4})\b', text))
+    if decs:
+        return float(decs[-1].group(1))
 
-    # Pattern 4: Number > 1 (treat as percentage)
+    # Pattern 4: Number > 1 (treat as percentage) — use last
     nums = re.findall(r'(\d+\.?\d*)', text)
     if nums:
-        # Take the last number (closest to the "answer")
         val = float(nums[-1])
         if val > 1:
             return val / 100.0
@@ -206,8 +223,8 @@ class LLMRouterConfig(BaseModel):
     providers: list[LLMProviderConfig] = []
     max_retries_per_provider: int = 2
     timeout_sec: float = 30.0
-    temperature: float = 0.1
-    max_tokens: int = 150
+    temperature: float = 0.3
+    max_tokens: int = 300
 
 
 # ── Rate Limit Tracker ──────────────────────────────────────────

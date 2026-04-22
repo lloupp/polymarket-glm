@@ -69,8 +69,8 @@ class LLMRouterConfig(BaseModel):
     enabled: bool = True
     max_retries_per_provider: int = 2
     timeout_sec: float = 30.0
-    temperature: float = 0.1
-    max_tokens: int = 150
+    temperature: float = 0.3
+    max_tokens: int = 300
 
     @property
     def active_providers(self) -> int:
