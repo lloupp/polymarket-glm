@@ -382,10 +382,15 @@ class LLMRouter:
             probability = parse_llm_probability(content)
             probability = _clamp(probability)
 
-            # Confidence from distance to 0.5 + high volume boost
-            confidence = abs(probability - 0.5) * 2
+            # Shrinkage: pull extreme estimates toward 0.5 (better calibration)
+            shrinkage = 0.15  # 15% regression toward market
+            probability = probability * (1 - shrinkage) + 0.5 * shrinkage
+            probability = _clamp(probability)
+
+            # Confidence from distance to 0.5 (capped at 0.85 to avoid overconfidence)
+            confidence = min(abs(probability - 0.5) * 2, 0.85)
             if market.volume > 100_000:
-                confidence = min(confidence + 0.1, 1.0)
+                confidence = min(confidence + 0.1, 0.85)
 
             return EstimateResult(
                 probability=round(probability, 4),
