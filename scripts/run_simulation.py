@@ -355,7 +355,7 @@ class SimulationEngine:
         fills_this_round = 0
         rejections_this_round = 0
 
-        for market in markets[:20]:  # cap at 20 markets per iteration
+        for market in markets[:20]: # cap at 20 markets per iteration
             try:
                 result = await self._process_market(market)
                 if result == "signal":
@@ -422,7 +422,7 @@ class SimulationEngine:
 
             estimate = await self._llm_router.estimate(mi, news_context=news_context)
             estimated_prob = estimate.probability
-            logger.debug(
+            logger.info(
                 "🧠 LLM estimate: %.2f (confidence=%.2f, source=%s) — %s",
                 estimated_prob, estimate.confidence, estimate.source,
                 market.question[:50],
