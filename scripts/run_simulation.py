@@ -30,6 +30,7 @@ from polymarket_glm.strategy.context_fetcher import ContextBuilder, ContextBuild
 from polymarket_glm.risk.controller import RiskController, RiskVerdict
 from polymarket_glm.execution.paper_executor import PaperExecutor
 from polymarket_glm.execution.exchange import OrderRequest
+from polymarket_glm.execution.portfolio_tracker import PortfolioTracker
 from polymarket_glm.monitoring.alerts import AlertManager, Alert, AlertLevel
 from polymarket_glm.ops.telegram_bot import TelegramBot
 from polymarket_glm.ops.health import HealthCheck, check_loop_health
@@ -61,6 +62,7 @@ class SimulationEngine:
         )
         self._risk = RiskController(config=settings.risk)
         self._executor = PaperExecutor(initial_balance=settings.paper_balance_usd)
+        self._portfolio = PortfolioTracker()
 
         # LLM Router (replaces Gaussian noise estimator)
         self._llm_router: LLMRouter | None = None
@@ -176,10 +178,19 @@ class SimulationEngine:
 
     def _status_provider(self) -> dict:
         acct = self._executor.account
+        pnl_data = {}
+        if self._portfolio.last_summary:
+            s = self._portfolio.last_summary
+            pnl_data = {
+                "unrealized_pnl": s.unrealized_pnl,
+                "total_pnl": s.total_pnl,
+                "open_positions": s.num_open_positions,
+            }
         return {
             "mode": self._settings.execution_mode.value,
             "balance": acct.balance_usd,
             "trades": self._total_fills,
+            **pnl_data,
         }
 
     def _risk_provider(self) -> dict:
@@ -196,13 +207,19 @@ class SimulationEngine:
         acct = self._executor.account
         result = []
         for pos in acct.positions:
-            market_id = pos.market_id
-            # Try to find the question from our cache
+            # Get current P&L if available
+            pnl = None
+            if self._portfolio.last_summary:
+                for p in self._portfolio.last_summary.positions:
+                    if p.market_id == pos.market_id and p.outcome == pos.outcome:
+                        pnl = p.unrealized_pnl
+                        break
             result.append({
-                "market": market_id[:20] + "...",
+                "market": pos.market_id[:20] + "...",
                 "side": "LONG",
                 "size": pos.size * pos.avg_price,
                 "avg_price": pos.avg_price,
+                "unrealized_pnl": pnl or 0.0,
             })
         return result
 
@@ -382,6 +399,22 @@ class SimulationEngine:
         # Update balance for drawdown check
         acct = self._executor.account
         self._risk.update_balance(acct.balance_usd)
+
+        # Mark-to-market P&L update
+        price_lookup = {m.market_id: m.outcome_prices[0] for m in markets if m.outcome_prices}
+        summary = self._portfolio.calculate(
+            positions=acct.positions,
+            price_lookup=price_lookup,
+            balance_usd=acct.balance_usd,
+        )
+        if summary.num_open_positions > 0:
+            logger.info(
+                "📊 P&L: unrealized=$%.2f (%.1f%%) | %d open positions | balance=$%.2f",
+                summary.unrealized_pnl,
+                summary.unrealized_pnl_pct,
+                summary.num_open_positions,
+                summary.balance_usd,
+            )
 
     async def _process_market(self, market) -> str | None:
         """Process a single market: fetch book → estimate → signal → risk → execute."""
