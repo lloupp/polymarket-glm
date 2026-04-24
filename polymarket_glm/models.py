@@ -119,6 +119,15 @@ class Position(BaseModel):
     size: float = 0.0
     avg_price: float = 0.0
     unrealized_pnl: float = 0.0
+    # Position management fields (optional, for TP/SL)
+    target_price: float | None = None  # take-profit price
+    stop_loss_price: float | None = None  # stop-loss price
+    opened_at_iteration: int = 0
+    status: str = "open"  # "open" | "closed"
+    close_reason: str = ""  # "take_profit" | "stop_loss" | "resolved" | "manual"
+    realized_pnl: float = 0.0
+    close_price: float | None = None
+    closed_at_iteration: int | None = None
 
 
 class Account(BaseModel):

@@ -22,6 +22,9 @@ class OrderRequest(BaseModel):
     price: float = Field(ge=0, le=1)
     size: float = Field(gt=0)
     order_type: str = "GTC"  # GTC, GTD, FOK
+    # Optional metadata for position management (used by PaperExecutor)
+    iteration: int = 0  # cycle when order was placed
+    close_reason: str = ""  # "take_profit" | "stop_loss" | "" for new entries
 
     @property
     def usd_value(self) -> float:

@@ -33,6 +33,7 @@ from polymarket_glm.execution.paper_executor import PaperExecutor
 from polymarket_glm.execution.exchange import OrderRequest
 from polymarket_glm.execution.portfolio_tracker import PortfolioTracker
 from polymarket_glm.execution.settlement_tracker import SettlementTracker
+from polymarket_glm.execution.position_manager import PositionManager, PositionManagerConfig
 from polymarket_glm.monitoring.alerts import AlertManager, Alert, AlertLevel
 from polymarket_glm.monitoring.daily_report import format_daily_report, format_pnl_alert
 from polymarket_glm.ops.telegram_bot import TelegramBot
@@ -67,6 +68,7 @@ class SimulationEngine:
         self._executor = PaperExecutor(initial_balance=settings.paper_balance_usd)
         self._portfolio = PortfolioTracker()
         self._settlement = SettlementTracker()
+        self._position_mgr = PositionManager(PositionManagerConfig())
 
         # LLM Router (replaces Gaussian noise estimator)
         self._llm_router: LLMRouter | None = None
@@ -98,12 +100,19 @@ class SimulationEngine:
                     model=llm_cfg.cerebras_model, rpm=llm_cfg.cerebras_rpm,
                     api_key=llm_cfg.cerebras_api_key, priority=4,
                 ))
-            if llm_cfg.mistral_api_key:
-                providers.append(LLMProviderConfig(
-                    name="mistral", base_url=llm_cfg.mistral_base_url,
-                    model=llm_cfg.mistral_model, rpm=llm_cfg.mistral_rpm,
-                    api_key=llm_cfg.mistral_api_key, priority=5,
-                ))
+        if llm_cfg.mistral_api_key:
+            providers.append(LLMProviderConfig(
+                name="mistral", base_url=llm_cfg.mistral_base_url,
+                model=llm_cfg.mistral_model, rpm=llm_cfg.mistral_rpm,
+                api_key=llm_cfg.mistral_api_key, priority=5,
+            ))
+        if llm_cfg.minimax_api_key:
+            providers.append(LLMProviderConfig(
+                name="minimax", base_url=llm_cfg.minimax_base_url,
+                model=llm_cfg.minimax_model, rpm=llm_cfg.minimax_rpm,
+                api_key=llm_cfg.minimax_api_key, priority=0,
+                enable_web_search=llm_cfg.minimax_enable_web_search,
+            ))
 
             self._llm_router = LLMRouter(RouterConfig(
                 providers=providers,
@@ -445,8 +454,65 @@ class SimulationEngine:
                     settlement_summary.num_settled,
                     settlement_summary.total_realized_pnl,
                 )
-                # Refresh account after settlements
-                acct = self._executor.account
+        # Refresh account after settlements
+        acct = self._executor.account
+
+        # ── Position Management: Take-Profit / Stop-Loss ──
+        closed_count = 0
+        if acct.positions:
+            # Build price lookup from current market data
+            for pos in acct.positions:
+                if pos.status != "open":
+                    continue
+                # Get current price for this position's market
+                current_price = None
+                for m in markets:
+                    if m.market_id == pos.market_id and m.outcome_prices:
+                        if pos.outcome.upper() == "YES":
+                            current_price = m.outcome_prices[0]
+                        elif pos.outcome.upper() == "NO":
+                            current_price = m.outcome_prices[1] if len(m.outcome_prices) > 1 else (1 - m.outcome_prices[0])
+                        break
+
+                if current_price is None:
+                    logger.debug("No price for %s/%s — keeping position open", pos.market_id[:12], pos.outcome)
+                    continue
+
+                should_close, reason = self._position_mgr.should_close(
+                    pos, current_price, self._iteration,
+                )
+
+                if should_close:
+                    try:
+                        exit_params = self._position_mgr.calculate_exit_order(
+                            pos, current_price, reason, self._iteration,
+                        )
+                        exit_order = OrderRequest(
+                            market_id=exit_params["market_id"],
+                            side=exit_params["side"],
+                            outcome=exit_params["outcome"],
+                            price=exit_params["price"],
+                            size=exit_params["size"],
+                            iteration=exit_params["_iteration"],
+                            close_reason=reason,
+                        )
+                        fill = self._executor.submit_order_sync(exit_order)
+                        if fill.filled:
+                            closed_count += 1
+                            logger.info(
+                                "📈 Position closed: %s/%s reason=%s pnl=$%.2f entry=%.4f exit=%.4f",
+                                pos.market_id[:12], pos.outcome, reason,
+                                exit_params["_realized_pnl"],
+                                pos.avg_price, current_price,
+                            )
+                        else:
+                            logger.warning("Position close fill failed: %s", fill.reason)
+                    except Exception as exc:
+                        logger.warning("Error closing position %s: %s", pos.market_id[:12], exc)
+
+        if closed_count > 0:
+            logger.info("Position manager: closed %d positions this iteration", closed_count)
+            acct = self._executor.account
 
         # Mark-to-market P&L update
         price_lookup = {m.market_id: m.outcome_prices[0] for m in markets if m.outcome_prices}
@@ -509,26 +575,42 @@ class SimulationEngine:
                 current_price=market.outcome_prices[0] if market.outcome_prices else 0.5,
                 category=getattr(market, "category", "") or "",
             )
-            # Fetch news/search context for the Superforecaster prompt
-            news_context = ""
-            if self._context_builder.has_any_source:
-                try:
-                    news_context = await self._context_builder.fetch_context(market.question)
-                    if news_context:
-                        logger.debug(
-                            "📡 Context fetched (%d chars) for: %s",
-                            len(news_context),
-                            market.question[:50],
-                        )
-                except Exception as exc:
-                    logger.debug("Context fetch failed for %s: %s", market.question[:30], exc)
+        # Fetch news/search context for the Superforecaster prompt
+        news_context = ""
+        if self._context_builder.has_any_source:
+            try:
+                news_context = await self._context_builder.fetch_context(market.question)
+                if news_context:
+                    logger.debug(
+                        "📡 Context fetched (%d chars) for: %s",
+                        len(news_context),
+                        market.question[:50],
+                    )
+            except Exception as exc:
+                logger.debug("Context fetch failed for %s: %s", market.question[:30], exc)
+
+        if self._use_llm:
             estimate = await self._llm_router.estimate(mi, news_context=news_context)
             estimated_prob = estimate.probability
+            edge_source = estimate.source
             logger.info(
                 "🧠 LLM estimate: %.2f (confidence=%.2f, source=%s) — %s",
-                estimated_prob, estimate.confidence, estimate.source,
+                estimated_prob, estimate.confidence, edge_source,
                 market.question[:50],
             )
+            # MiniMax-specific observability
+            if estimate.web_search_summary:
+                logger.info(
+                    "🔍 MiniMax: prob=%.2f confidence=%s reasoning=%s sources=%s",
+                    estimated_prob, estimate.confidence, estimate.reasoning[:80],
+                    estimate.web_search_summary[:80],
+                )
+            # Log fallback reason if applicable
+            if "fallback" in edge_source or "low_confidence" in edge_source:
+                logger.warning(
+                    "⚠️ Edge source fallback: %s — reason: %s",
+                    edge_source, estimate.reasoning[:100],
+                )
         else:
             # Fallback: Gaussian noise estimator (for testing without LLM keys)
             import random
@@ -572,21 +654,32 @@ class SimulationEngine:
                 outcome = signal.outcome
                 price = signal.market_price
 
-            order = OrderRequest(
-                market_id=signal.market_id,
-                side=side,
-                outcome=outcome,
-                price=price,
-                size=signal.size_usd / price if price > 0 else 0,
+        order = OrderRequest(
+            market_id=signal.market_id,
+            side=side,
+            outcome=outcome,
+            price=price,
+            size=signal.size_usd / price if price > 0 else 0,
+            iteration=self._iteration,
+        )
+
+        fill = await self._executor.submit_order(order)
+
+        if fill.filled:
+            self._risk.record_fill(signal.market_id, signal.outcome, signal.size_usd)
+            logger.info(
+                "✅ Filled: %s %s $%.2f @ %.4f",
+                side.value, signal.outcome, signal.size_usd, signal.market_price,
             )
 
-            fill = await self._executor.submit_order(order)
-
-            if fill.filled:
-                self._risk.record_fill(signal.market_id, signal.outcome, signal.size_usd)
+            # Set TP/SL targets on the new position
+            pos = self._executor.get_position(signal.market_id, outcome)
+            if pos:
+                self._position_mgr.set_targets(pos)
                 logger.info(
-                    "✅ Filled: %s %s $%.2f @ %.4f",
-                    side.value, signal.outcome, signal.size_usd, signal.market_price,
+                    "🎯 Position targets: %s/%s TP=%.4f SL=%.4f",
+                    signal.market_id[:12], outcome,
+                    pos.target_price, pos.stop_loss_price,
                 )
 
                 # Alert for fills

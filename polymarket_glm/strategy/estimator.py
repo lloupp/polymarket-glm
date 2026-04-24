@@ -31,6 +31,7 @@ class EstimateResult(BaseModel):
     confidence: float = Field(ge=0, le=1, default=0.0)
     source: str = "unknown"
     reasoning: str = ""
+    web_search_summary: str = ""  # MiniMax web search sources
 
     @field_validator("probability")
     @classmethod

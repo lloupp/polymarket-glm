@@ -256,6 +256,165 @@ class TestSuperforecasterPrompt:
         # Should not have news section
         assert "Relevant News" not in prompt
 
+    def test_system_prompt_has_forced_cot(self):
+        """System prompt requires ARGUMENTS FOR and ARGUMENTS AGAINST."""
+        from polymarket_glm.strategy.llm_router import SUPERFORECASTER_SYSTEM_PROMPT
+        assert "ARGUMENTS FOR" in SUPERFORECASTER_SYSTEM_PROMPT
+        assert "ARGUMENTS AGAINST" in SUPERFORECASTER_SYSTEM_PROMPT
+        assert "NET ASSESSMENT" in SUPERFORECASTER_SYSTEM_PROMPT
+        assert "ESTIMATE:" in SUPERFORECASTER_SYSTEM_PROMPT
+
+    def test_user_prompt_reminds_cot(self):
+        """User prompt reminds LLM to include CoT sections."""
+        from polymarket_glm.strategy.llm_router import build_superforecaster_prompt
+        market = MarketInfo(question="Will X happen?", volume=100, current_price=0.3)
+        prompt = build_superforecaster_prompt(market)
+        assert "ARGUMENTS FOR" in prompt
+        assert "ARGUMENTS AGAINST" in prompt
+
+
+# ── S13-T2: Chain-of-Thought Validation ──────────────────────────
+
+class TestCoTValidation:
+    """Tests for FORCED chain-of-thought validation + penalty."""
+
+    def test_valid_cot_response(self):
+        """Full CoT with FOR, AGAINST, NET, ESTIMATE → valid."""
+        from polymarket_glm.strategy.llm_router import validate_cot_structure
+        text = """\
+ARGUMENTS FOR (factors that increase probability):
+- Recent polls show 55% support
+- Historical base rate for incumbents is 60%
+
+ARGUMENTS AGAINST (factors that decrease probability):
+- Economic downturn historically hurts incumbents
+- Scandal last month
+
+NET ASSESSMENT:
+The polls are favorable but economic headwinds suggest caution.
+
+ESTIMATE: 52%
+"""
+        result = validate_cot_structure(text)
+        assert result.is_valid
+        assert result.has_arguments_for
+        assert result.has_arguments_against
+        assert result.has_net_assessment
+        assert result.has_estimate
+        assert not result.penalty_applied
+
+    def test_missing_for_section(self):
+        """Missing ARGUMENTS FOR → invalid."""
+        from polymarket_glm.strategy.llm_router import validate_cot_structure
+        text = """\
+ARGUMENTS AGAINST (factors that decrease probability):
+- Some factor
+
+ESTIMATE: 30%
+"""
+        result = validate_cot_structure(text)
+        assert not result.is_valid
+        assert not result.has_arguments_for
+        assert result.has_arguments_against
+        assert result.penalty_applied
+        assert "ARGUMENTS FOR" in result.penalty_reason
+
+    def test_missing_against_section(self):
+        """Missing ARGUMENTS AGAINST → invalid."""
+        from polymarket_glm.strategy.llm_router import validate_cot_structure
+        text = """\
+ARGUMENTS FOR (factors that increase probability):
+- Some factor
+
+ESTIMATE: 70%
+"""
+        result = validate_cot_structure(text)
+        assert not result.is_valid
+        assert result.has_arguments_for
+        assert not result.has_arguments_against
+        assert result.penalty_applied
+        assert "ARGUMENTS AGAINST" in result.penalty_reason
+
+    def test_missing_estimate(self):
+        """Missing ESTIMATE line → invalid."""
+        from polymarket_glm.strategy.llm_router import validate_cot_structure
+        text = """\
+ARGUMENTS FOR:
+- Some factor
+
+ARGUMENTS AGAINST:
+- Some factor
+"""
+        result = validate_cot_structure(text)
+        assert not result.is_valid
+        assert not result.has_estimate
+        assert "ESTIMATE" in result.penalty_reason
+
+    def test_no_cot_at_all(self):
+        """Completely unstructured response → invalid."""
+        from polymarket_glm.strategy.llm_router import validate_cot_structure
+        text = "I think it will probably happen. Maybe 65% chance."
+        result = validate_cot_structure(text)
+        assert not result.is_valid
+        assert result.penalty_applied
+
+    def test_penalty_no_shrinkage_for_valid(self):
+        """Valid CoT → no penalty applied."""
+        from polymarket_glm.strategy.llm_router import validate_cot_structure, apply_cot_penalty
+        text = "ARGUMENTS FOR:\n- X\n\nARGUMENTS AGAINST:\n- Y\n\nESTIMATE: 60%"
+        validation = validate_cot_structure(text)
+        assert apply_cot_penalty(0.60, validation) == 0.60
+
+    def test_penalty_missing_one_section(self):
+        """Missing one section → 10% shrinkage toward 0.5."""
+        from polymarket_glm.strategy.llm_router import validate_cot_structure, apply_cot_penalty
+        text = "ARGUMENTS FOR:\n- X\n\nESTIMATE: 80%"
+        validation = validate_cot_structure(text)
+        penalized = apply_cot_penalty(0.80, validation)
+        # Missing AGAINST: 10% shrinkage → 0.80 * 0.90 + 0.5 * 0.10 = 0.77
+        assert abs(penalized - 0.77) < 0.001
+
+    def test_penalty_missing_both_sections(self):
+        """Missing both FOR and AGAINST → 20% shrinkage toward 0.5."""
+        from polymarket_glm.strategy.llm_router import validate_cot_structure, apply_cot_penalty
+        text = "ESTIMATE: 90%"
+        validation = validate_cot_structure(text)
+        penalized = apply_cot_penalty(0.90, validation)
+        # 2 missing sections: 20% shrinkage → 0.90 * 0.80 + 0.5 * 0.20 = 0.82
+        assert abs(penalized - 0.82) < 0.001
+
+    def test_penalty_clamps_to_valid_range(self):
+        """Penalty result stays within [0, 1]."""
+        from polymarket_glm.strategy.llm_router import validate_cot_structure, apply_cot_penalty
+        text = "Just a random guess"
+        validation = validate_cot_structure(text)
+        # Test with extreme values
+        assert 0.0 <= apply_cot_penalty(0.0, validation) <= 1.0
+        assert 0.0 <= apply_cot_penalty(1.0, validation) <= 1.0
+
+    def test_cot_extracts_arguments(self):
+        """CoT validation extracts FOR and AGAINST text."""
+        from polymarket_glm.strategy.llm_router import validate_cot_structure
+        text = """\
+ARGUMENTS FOR:
+- Polls show 55% support
+- Good economy
+
+ARGUMENTS AGAINST:
+- Scandal last week
+- Opponent gaining
+
+NET ASSESSMENT:
+Toss-up leaning slightly positive.
+
+ESTIMATE: 55%
+"""
+        result = validate_cot_structure(text)
+        assert "55% SUPPORT" in result.arguments_for
+        assert "GOOD ECONOMY" in result.arguments_for
+        assert "SCANDAL" in result.arguments_against
+        assert "OPPONENT" in result.arguments_against
+
 
 # ── S11-T5: parse probability from LLM ──────────────────────────
 

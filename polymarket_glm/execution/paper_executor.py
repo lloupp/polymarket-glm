@@ -103,13 +103,34 @@ class PaperExecutor:
                     outcome=request.outcome,
                     size=total_size,
                     avg_price=new_avg,
+                    # Preserve TP/SL fields from existing position
+                    target_price=existing.target_price,
+                    stop_loss_price=existing.stop_loss_price,
+                    opened_at_iteration=existing.opened_at_iteration,
+                    status=existing.status,
                 )
             elif request.side == Side.SELL:
                 new_size = existing.size - request.size
+                realized_pnl = (request.price - existing.avg_price) * request.size
                 if new_size <= 0:
                     # Fully closed position — return proceeds
                     proceeds = request.price * request.size - fee
                     self._balance += proceeds
+                    # Update position to closed state for tracking
+                    market_positions[request.outcome] = Position(
+                        market_id=request.market_id,
+                        outcome=request.outcome,
+                        size=0,
+                        avg_price=existing.avg_price,
+                        target_price=existing.target_price,
+                        stop_loss_price=existing.stop_loss_price,
+                        opened_at_iteration=existing.opened_at_iteration,
+                        status="closed",
+                        close_reason=request.close_reason,
+                        realized_pnl=realized_pnl,
+                        close_price=request.price,
+                    )
+                    # Remove from active positions after recording
                     del market_positions[request.outcome]
                 else:
                     proceeds = request.price * request.size - fee
@@ -119,6 +140,10 @@ class PaperExecutor:
                         outcome=request.outcome,
                         size=new_size,
                         avg_price=existing.avg_price,
+                        target_price=existing.target_price,
+                        stop_loss_price=existing.stop_loss_price,
+                        opened_at_iteration=existing.opened_at_iteration,
+                        status=existing.status,
                     )
         else:
             if request.side == Side.BUY:
@@ -127,6 +152,8 @@ class PaperExecutor:
                     outcome=request.outcome,
                     size=request.size,
                     avg_price=request.price,
+                    opened_at_iteration=request.iteration,
+                    status="open",
                 )
             else:
                 # Can't sell what we don't have

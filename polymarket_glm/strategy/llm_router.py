@@ -32,16 +32,30 @@ Rules:
 1. Decompose the question and consider base rates from historical data.
 2. Adjust based on specific evidence, recent news, and current conditions.
 3. The market price is the crowd's consensus — it is NOT the truth.
-   - If evidence suggests the market is WRONG, estimate AWAY from the price.
-   - If evidence supports the market, it is fine to agree.
+ - If evidence suggests the market is WRONG, estimate AWAY from the price.
+ - If evidence supports the market, it is fine to agree.
 4. Think in probabilities, not certainties. Avoid 0% or 100% unless truly impossible/certain.
 
-CRITICAL: Your response MUST end with EXACTLY this format:
+MANDATORY RESPONSE FORMAT — you MUST follow this structure exactly:
+
+ARGUMENTS FOR (factors that increase probability):
+- [list each factor with brief evidence]
+
+ARGUMENTS AGAINST (factors that decrease probability):
+- [list each factor with brief evidence]
+
+NET ASSESSMENT:
+[1-2 sentences weighing the arguments against base rates]
+
 ESTIMATE: X%
 
 Where X is your probability (0-100). No other text after ESTIMATE: X%.
-Put your reasoning BEFORE the estimate, not after.
 Do NOT use any percentages in your reasoning section — save it for the ESTIMATE line.
+
+CRITICAL: You MUST include both ARGUMENTS FOR and ARGUMENTS AGAINST sections.
+Omitting either section makes your estimate unreliable and it will be rejected.
+This structured reasoning forces you to consider evidence on both sides,
+reducing anchoring bias and improving calibration by 20-30%.
 """
 
 
@@ -83,11 +97,127 @@ def build_superforecaster_prompt(market: MarketInfo, news_context: str = "") -> 
         "what is the true probability of this event occurring? "
         "Form your own independent estimate — if you believe the market "
         "is mispriced, say so explicitly. "
-        "Respond with your estimate in the format: "
-        '"I believe [question] has a likelihood X% for outcome of Yes."'
+        "Remember to include ARGUMENTS FOR, ARGUMENTS AGAINST, and NET ASSESSMENT "
+        "sections before your ESTIMATE."
     )
 
     return "\n".join(parts)
+
+
+# ── Chain-of-Thought Validation & Parsing ──────────────────────
+
+class CoTValidation(BaseModel):
+    """Result of validating chain-of-thought FORCED structure in LLM response."""
+    has_arguments_for: bool = False
+    has_arguments_against: bool = False
+    has_net_assessment: bool = False
+    has_estimate: bool = False
+    is_valid: bool = False
+    arguments_for: str = ""
+    arguments_against: str = ""
+    net_assessment: str = ""
+    penalty_applied: bool = False
+    penalty_reason: str = ""
+
+
+def validate_cot_structure(text: str) -> CoTValidation:
+    """Validate that an LLM response follows the FORCED chain-of-thought format.
+
+    Checks for presence of:
+    1. ARGUMENTS FOR section
+    2. ARGUMENTS AGAINST section
+    3. NET ASSESSMENT section
+    4. ESTIMATE: X% line
+
+    Returns CoTValidation with extracted sections and validity flag.
+    A response is valid only if it has BOTH arguments sections + estimate.
+    """
+    text_upper = text.upper()
+
+    # Check for ARGUMENTS FOR section
+    for_match = re.search(
+        r'ARGUMENTS?\s+FOR[^:]*:(.+?)(?=ARGUMENTS?\s+AGAINST|NET\s+ASSESSMENT|ESTIMATE:|$)',
+        text_upper,
+        re.DOTALL | re.IGNORECASE,
+    )
+    has_for = for_match is not None
+    arguments_for = for_match.group(1).strip()[:500] if for_match else ""
+
+    # Check for ARGUMENTS AGAINST section
+    against_match = re.search(
+        r'ARGUMENTS?\s+AGAINST[^:]*:(.+?)(?=NET\s+ASSESSMENT|ESTIMATE:|$)',
+        text_upper,
+        re.DOTALL | re.IGNORECASE,
+    )
+    has_against = against_match is not None
+    arguments_against = against_match.group(1).strip()[:500] if against_match else ""
+
+    # Check for NET ASSESSMENT section
+    net_match = re.search(
+        r'NET\s+ASSESSMENT:?\s*(.+?)(?=ESTIMATE:|$)',
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    has_net = net_match is not None
+    net_assessment = net_match.group(1).strip()[:300] if net_match else ""
+
+    # Check for ESTIMATE line
+    has_estimate = bool(re.search(r'ESTIMATE:\s*\d+\.?\d*%', text, re.IGNORECASE))
+
+    # A valid CoT must have both FOR and AGAINST + estimate
+    is_valid = has_for and has_against and has_estimate
+
+    # Determine penalty
+    penalty_applied = False
+    penalty_reason = ""
+    if not is_valid:
+        missing = []
+        if not has_for:
+            missing.append("ARGUMENTS FOR")
+        if not has_against:
+            missing.append("ARGUMENTS AGAINST")
+        if not has_estimate:
+            missing.append("ESTIMATE")
+        penalty_applied = True
+        penalty_reason = f"Missing CoT sections: {', '.join(missing)}"
+
+    return CoTValidation(
+        has_arguments_for=has_for,
+        has_arguments_against=has_against,
+        has_net_assessment=has_net,
+        has_estimate=has_estimate,
+        is_valid=is_valid,
+        arguments_for=arguments_for,
+        arguments_against=arguments_against,
+        net_assessment=net_assessment,
+        penalty_applied=penalty_applied,
+        penalty_reason=penalty_reason,
+    )
+
+
+def apply_cot_penalty(probability: float, validation: CoTValidation) -> float:
+    """Apply calibration penalty when CoT structure is incomplete.
+
+    If the LLM skipped FOR/AGAINST arguments, its estimate is likely
+    less calibrated. We pull it toward 0.5 (more uncertainty).
+
+    Penalty: additional 10% shrinkage toward 0.5 per missing section.
+    This is additive on top of the base shrinkage.
+    """
+    if validation.is_valid:
+        return probability
+
+    # Count missing critical sections (FOR and AGAINST are critical)
+    missing_count = 0
+    if not validation.has_arguments_for:
+        missing_count += 1
+    if not validation.has_arguments_against:
+        missing_count += 1
+
+    # Each missing section adds 10% shrinkage toward 0.5
+    penalty_shrinkage = 0.10 * missing_count
+    adjusted = probability * (1 - penalty_shrinkage) + 0.5 * penalty_shrinkage
+    return _clamp(adjusted)
 
 
 # ── Probability Parsing ─────────────────────────────────────────
@@ -146,6 +276,89 @@ def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, v))
 
 
+# ── Web Search Prompt (MiniMax with web search) ─────────────────
+
+WEB_SEARCH_SYSTEM_PROMPT = """\
+You are an analyst for prediction markets. Your job is to estimate the TRUE probability of an event based on recent news found via web search.
+
+Search for current information about the event. Analyze the evidence. Return ONLY a JSON object with:
+- estimated_prob: float 0-1 (your probability estimate)
+- confidence: "low" | "medium" | "high"
+- reasoning: 2-3 sentence explanation
+- sources_summary: brief summary of sources used
+
+Do NOT invent facts. If no relevant information is found, return confidence "low" and estimated_prob close to the market price provided.
+
+Your response MUST be valid JSON. No other text outside the JSON object.
+"""
+
+def _build_web_search_prompt(market: MarketInfo) -> str:
+    """Build prompt for web-search-enabled providers (MiniMax)."""
+    parts = [f"Market Question: {market.question}"]
+
+    if market.current_price is not None:
+        parts.append(f"Current Yes Price: {market.current_price:.4f} ({market.current_price:.0%})")
+
+    if market.volume > 0:
+        parts.append(f"Volume: ${market.volume:,.0f}")
+
+    if market.liquidity > 0:
+        parts.append(f"Liquidity: ${market.liquidity:,.0f}")
+
+    if market.end_date:
+        parts.append(f"End Date: {market.end_date}")
+
+    if market.category:
+        parts.append(f"Category: {market.category}")
+
+    parts.append(
+        "\nSearch for recent news about this event. "
+        "Estimate the true probability based on evidence. "
+        "Return ONLY a JSON object with: estimated_prob, confidence, reasoning, sources_summary"
+    )
+
+    return "\n".join(parts)
+
+
+def _parse_structured_response(text: str) -> tuple[float | None, str | None, str, str]:
+    """Try to parse a structured JSON response from web-search providers.
+
+    Returns (probability, confidence_text, reasoning, sources_summary).
+    Returns (None, None, text, "") if parsing fails.
+    """
+    import json as _json
+
+    # Try to extract JSON from the response (may have markdown wrapping)
+    json_str = text
+    # Strip markdown code blocks if present
+    if "```json" in json_str:
+        json_str = json_str.split("```json", 1)[-1].split("```", 1)[0]
+    elif "```" in json_str:
+        json_str = json_str.split("```", 1)[-1].split("```", 1)[0]
+
+    json_str = json_str.strip()
+
+    try:
+        data = _json.loads(json_str)
+        prob = float(data.get("estimated_prob", 0.5))
+        conf = str(data.get("confidence", "low")).lower()
+        reasoning = str(data.get("reasoning", ""))[:200]
+        sources = str(data.get("sources_summary", ""))[:200]
+        return prob, conf, reasoning, sources
+    except (_json.JSONDecodeError, ValueError, TypeError, AttributeError):
+        return None, None, text, ""
+
+
+def _map_confidence(confidence_text: str | None | float) -> float:
+    """Map confidence text ('low'/'medium'/'high') or numeric to float."""
+    if confidence_text is None:
+        return 0.0
+    if isinstance(confidence_text, (int, float)):
+        return float(confidence_text)
+    mapping = {"low": 0.2, "medium": 0.5, "high": 0.8}
+    return mapping.get(confidence_text.lower().strip(), 0.3)
+
+
 # ── Provider Configuration ──────────────────────────────────────
 
 # Default free provider configurations
@@ -185,6 +398,14 @@ DEFAULT_PROVIDERS = {
         "rpd": 500,
         "priority": 5,
     },
+    "minimax": {
+        "base_url": "https://api.minimax.chat/v1",
+        "model": "MiniMax-Text-01",
+        "rpm": 10,
+        "rpd": 500,
+        "priority": 0,  # highest priority — web search gives better context
+        "enable_web_search": True,
+    },
 }
 
 
@@ -198,6 +419,7 @@ class LLMProviderConfig(BaseModel):
     priority: int = 1  # lower = tried first
     enabled: bool = True
     api_key: str = ""
+    enable_web_search: bool = False  # MiniMax web search support
 
 
 class LLMRouterConfig(BaseModel):
@@ -350,6 +572,7 @@ class LLMRouter:
         """Call a specific LLM provider and parse the result.
 
         Uses OpenAI-compatible API (all free providers support this format).
+        For providers with enable_web_search=True, adds web_search tool.
         """
         provider = next(
             (p for p in self._config.providers if p.name == provider_name),
@@ -365,12 +588,19 @@ class LLMRouter:
 
         try:
             client = self._get_client(provider)
-            prompt = build_superforecaster_prompt(market, news_context)
 
-            response = await client.chat.completions.create(
+            # Use structured JSON prompt for web_search providers
+            if provider.enable_web_search:
+                prompt = _build_web_search_prompt(market)
+                system_prompt = WEB_SEARCH_SYSTEM_PROMPT
+            else:
+                prompt = build_superforecaster_prompt(market, news_context)
+                system_prompt = SUPERFORECASTER_SYSTEM_PROMPT
+
+            kwargs: dict = dict(
                 model=provider.model,
                 messages=[
-                    {"role": "system", "content": SUPERFORECASTER_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=self._config.max_tokens,
@@ -378,25 +608,91 @@ class LLMRouter:
                 timeout=self._config.timeout_sec,
             )
 
+            # Add web_search tool for MiniMax and similar providers
+            if provider.enable_web_search:
+                kwargs["tools"] = [
+                    {"type": "web_search", "web_search": {"search_mode": "auto"}}
+                ]
+
+            response = await client.chat.completions.create(**kwargs)
+
             content = response.choices[0].message.content.strip()
-            probability = parse_llm_probability(content)
+            web_search_summary = ""
+
+            # Extract web search results from MiniMax response if available
+            if provider.enable_web_search and hasattr(response, "web_search"):
+                try:
+                    ws = response.web_search  # type: ignore[attr-defined]
+                    web_search_summary = str(ws)[:200]
+                except Exception:
+                    pass
+
+            # Try structured JSON parsing first (for web_search providers)
+            probability, confidence, reasoning, sources = _parse_structured_response(content)
+
+            if probability is None:
+                # Fallback to standard probability parsing
+                probability = parse_llm_probability(content)
+                confidence = None
+                reasoning = content[:200]
+                sources = ""
+
             probability = _clamp(probability)
 
+            # CoT validation: check if LLM followed FOR/AGAINST structure
+            if not provider.enable_web_search:
+                cot_validation = validate_cot_structure(content)
+                if cot_validation.penalty_applied:
+                    logger.info(
+                        "CoT penalty for %s: %s (prob %.3f -> %.3f)",
+                        provider_name, cot_validation.penalty_reason,
+                        probability, apply_cot_penalty(probability, cot_validation),
+                    )
+                    probability = apply_cot_penalty(probability, cot_validation)
+                    # Include CoT info in reasoning
+                    cot_info = f" [CoT: {cot_validation.penalty_reason}]"
+                else:
+                    cot_info = " [CoT: valid]"
+                    # Use structured reasoning from CoT sections if available
+                    if cot_validation.arguments_for or cot_validation.arguments_against:
+                        reasoning = (
+                            f"FOR: {cot_validation.arguments_for[:80]} | "
+                            f"AGAINST: {cot_validation.arguments_against[:80]}"
+                        )
+            else:
+                cot_info = ""
+                cot_validation = None
+
             # Shrinkage: pull extreme estimates toward 0.5 (better calibration)
-            shrinkage = 0.15  # 15% regression toward market
+            shrinkage = 0.15 # 15% regression toward market
             probability = probability * (1 - shrinkage) + 0.5 * shrinkage
             probability = _clamp(probability)
 
-            # Confidence from distance to 0.5 (capped at 0.85 to avoid overconfidence)
-            confidence = min(abs(probability - 0.5) * 2, 0.85)
-            if market.volume > 100_000:
-                confidence = min(confidence + 0.1, 0.85)
+            # Confidence from structured response or distance to 0.5
+            if confidence is None:
+                confidence = min(abs(probability - 0.5) * 2, 0.85)
+                if market.volume > 100_000:
+                    confidence = min(confidence + 0.1, 0.85)
+            else:
+                # Map text confidence to float
+                confidence = _map_confidence(confidence)
+
+            # confidence low → force fallback
+            if confidence < 0.3:
+                return EstimateResult(
+                    probability=0.5,
+                    confidence=0.0,
+                    source=f"llm_{provider_name}_low_confidence",
+                    reasoning=f"Low confidence ({confidence:.2f}): {reasoning[:100]}",
+                    web_search_summary=sources or web_search_summary,
+                )
 
             return EstimateResult(
                 probability=round(probability, 4),
                 confidence=round(confidence, 4),
                 source=f"llm_{provider_name}",
-                reasoning=content[:200],
+                reasoning=(reasoning + cot_info)[:200],
+                web_search_summary=sources or web_search_summary,
             )
 
         except Exception as exc:

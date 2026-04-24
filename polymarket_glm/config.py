@@ -67,6 +67,12 @@ class LLMRouterConfig(BaseModel):
     mistral_model: str = "mistral-small-latest"
     mistral_rpm: int = 60
 
+    minimax_api_key: str = ""
+    minimax_base_url: str = "https://api.minimax.chat/v1"
+    minimax_model: str = "MiniMax-Text-01"
+    minimax_rpm: int = 10
+    minimax_enable_web_search: bool = True
+
     enabled: bool = True
     max_retries_per_provider: int = 2
     timeout_sec: float = 30.0
@@ -78,7 +84,7 @@ class LLMRouterConfig(BaseModel):
         """Count of providers with API keys configured."""
         return sum(1 for k in [
             self.groq_api_key, self.gemini_api_key, self.github_api_key,
-            self.cerebras_api_key, self.mistral_api_key,
+            self.cerebras_api_key, self.mistral_api_key, self.minimax_api_key,
         ] if k)
 
 
