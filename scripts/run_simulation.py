@@ -299,10 +299,15 @@ class SimulationEngine:
                     logger.info("Max iterations (%d) reached", self._max_iterations)
                     break
 
-                await self._run_iteration()
+                try:
+                    await self._run_iteration()
+                    self._health.record_heartbeat(iteration=self._iteration, mode="paper")
+                except Exception as exc:
+                    self._health.record_error(str(exc))
+                    logger.warning("Iteration %d failed: %s", self._iteration, exc)
                 self._iteration += 1
 
-                # Health heartbeat
+                # Health check
                 try:
                     hc_status = check_loop_health(self._health)
                     if hc_status.value == "stuck":
