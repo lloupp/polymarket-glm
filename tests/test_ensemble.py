@@ -227,3 +227,114 @@ class TestAggregateEstimates:
         result = aggregate_estimates(estimates, cfg)
         assert "default" in result.reasoning
         assert "base_rates" in result.reasoning
+
+
+# ── Bug Fix #2: custom_prompt is passed to router ──────────────────
+
+class TestEnsembleCustomPromptUsage:
+    """Verify that non-default templates pass their paraphrase prompt to the router.
+
+    Bug: _estimate_with_template built paraphrase_prompt but never passed it
+    to router.estimate(), so all templates got the same default prompt.
+    """
+
+    def _make_market(self) -> MarketInfo:
+        return MarketInfo(
+            question="Will Bitcoin reach $150k by 2026?",
+            volume=1_000_000,
+            spread=0.03,
+            current_price=0.25,
+            category="crypto",
+            end_date="2026-12-31",
+        )
+
+    @pytest.mark.asyncio
+    async def test_ensemble_non_default_uses_custom_prompt(self):
+        """When template != 'default', the router must receive a custom_prompt
+        that contains the template-specific instructions (e.g., base rate)."""
+        from polymarket_glm.strategy.llm_router import (
+            LLMProviderConfig,
+            LLMRouter,
+            LLMRouterConfig,
+        )
+        from polymarket_glm.strategy.ensemble import EnsembleEstimator
+
+        p = LLMProviderConfig(
+            name="groq", base_url="https://api.groq.com/v1", api_key="key"
+        )
+        cfg = LLMRouterConfig(providers=[p])
+        router = LLMRouter(cfg)
+        estimator = EnsembleEstimator(
+            router, EnsembleConfig(n_templates=2, include_default=False)
+        )
+
+        captured_kwargs: dict = {}
+
+        mock_result = EstimateResult(
+            probability=0.65, confidence=0.8, source="llm_groq"
+        )
+
+        original_estimate = router.estimate
+
+        async def mock_estimate(market, news_context="", *, custom_prompt=None):
+            captured_kwargs["custom_prompt"] = custom_prompt
+            captured_kwargs["news_context"] = news_context
+            captured_kwargs["market"] = market
+            return mock_result
+
+        router.estimate = mock_estimate
+
+        # Use a non-default template (base_rates_first)
+        result = await estimator._estimate_with_template(
+            self._make_market(), "base_rates_first", "BTC surged to $100k"
+        )
+
+        # The router must have received a custom_prompt
+        assert captured_kwargs.get("custom_prompt") is not None, (
+            "router.estimate() was not called with custom_prompt"
+        )
+        # The custom_prompt should contain template-specific instructions
+        custom_prompt = captured_kwargs["custom_prompt"]
+        assert "base rate" in custom_prompt.lower() or "reference class" in custom_prompt.lower(), (
+            f"custom_prompt does not contain template-specific instructions. Got: {custom_prompt[:200]}"
+        )
+        # The custom_prompt should also contain the market question
+        assert "Bitcoin" in custom_prompt
+        # The news context should be in the prompt
+        assert "BTC surged" in custom_prompt
+
+    @pytest.mark.asyncio
+    async def test_ensemble_default_template_no_custom_prompt(self):
+        """When template == 'default', the router should NOT receive a custom_prompt."""
+        from polymarket_glm.strategy.llm_router import (
+            LLMProviderConfig,
+            LLMRouter,
+            LLMRouterConfig,
+        )
+        from polymarket_glm.strategy.ensemble import EnsembleEstimator
+
+        p = LLMProviderConfig(
+            name="groq", base_url="https://api.groq.com/v1", api_key="key"
+        )
+        cfg = LLMRouterConfig(providers=[p])
+        router = LLMRouter(cfg)
+        estimator = EnsembleEstimator(router, EnsembleConfig())
+
+        captured_kwargs: dict = {}
+
+        mock_result = EstimateResult(
+            probability=0.65, confidence=0.8, source="llm_groq"
+        )
+
+        async def mock_estimate(market, news_context="", *, custom_prompt=None):
+            captured_kwargs["custom_prompt"] = custom_prompt
+            return mock_result
+
+        router.estimate = mock_estimate
+
+        result = await estimator._estimate_with_template(
+            self._make_market(), "default", ""
+        )
+
+        # For default template, custom_prompt should be None
+        assert captured_kwargs.get("custom_prompt") is None

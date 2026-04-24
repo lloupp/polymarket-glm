@@ -382,37 +382,19 @@ class EnsembleEstimator:
     ) -> EstimateResult:
         """Run a single template estimate through the LLM router.
 
-        For non-default templates, we build a custom prompt and call
-        the router's _call_provider method directly (bypassing the
-        standard prompt builder).
+        For non-default templates, we build a custom prompt and pass it
+        to the router's estimate method via the custom_prompt parameter,
+        which bypasses the standard prompt builder.
         """
         if template == "default":
             # Use the standard router path (includes CoT validation)
             return await self._router.estimate(market, news_context)
 
-        # For paraphrase templates, we need to call the router
-        # but with a custom prompt. We do this by calling the
-        # router's estimate method with a modified MarketInfo
-        # that includes the template instruction in the question.
-        # This is a pragmatic approach that works with the existing
-        # router architecture without major refactoring.
+        # For paraphrase templates, build a custom prompt and pass it
+        # to the router so it uses this instead of the default prompt.
         paraphrase_prompt = build_paraphrase_prompt(market, template, news_context)
 
-        # Create a modified market with template info embedded
-        # The router will still apply CoT validation + shrinkage
-        modified_market = MarketInfo(
-            question=market.question,
-            volume=market.volume,
-            liquidity=market.liquidity,
-            spread=market.spread,
-            current_price=market.current_price,
-            category=market.category,
-            end_date=market.end_date,
-        )
-
-        # Call through the router with the paraphrase prompt
-        # We use the router's internal method to inject custom prompt
-        result = await self._router.estimate(modified_market, news_context)
+        result = await self._router.estimate(market, news_context, custom_prompt=paraphrase_prompt)
 
         # Tag the source with the template name
         return EstimateResult(

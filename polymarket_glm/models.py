@@ -120,8 +120,10 @@ class Position(BaseModel):
     avg_price: float = 0.0
     unrealized_pnl: float = 0.0
     # Position management fields (optional, for TP/SL)
-    target_price: float | None = None  # take-profit price
-    stop_loss_price: float | None = None  # stop-loss price
+    target_price: float | None = None # take-profit price
+    stop_loss_price: float | None = None # stop-loss price
+    high_water_mark: float = 0.0 # highest price seen since entry (for trailing stop)
+    trailing_activated: bool = False # whether trailing stop is active
     opened_at_iteration: int = 0
     status: str = "open"  # "open" | "closed"
     close_reason: str = ""  # "take_profit" | "stop_loss" | "resolved" | "manual"

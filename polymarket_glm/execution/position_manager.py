@@ -16,9 +16,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PositionManagerConfig:
     """Configuration for position management."""
-    tp_pct: float = 0.50  # take-profit at 50% gain (e.g. buy at 0.10 → TP at 0.15)
-    sl_pct: float = 0.50  # stop-loss at 50% loss (e.g. buy at 0.10 → SL at 0.05)
-    min_hold_iterations: int = 1  # minimum cycles before allowing close
+    tp_pct: float = 0.50 # take-profit at 50% gain (e.g. buy at 0.10 → TP at 0.15)
+    sl_pct: float = 0.50 # stop-loss at 50% loss (e.g. buy at 0.10 → SL at 0.05)
+    min_hold_iterations: int = 1 # minimum cycles before allowing close
+    trailing_stop_activation_pct: float = 0.15 # price must rise 15% above entry to activate
+    trailing_stop_delta_pct: float = 0.08 # after activation, close if price drops 8% from HWM
 
 
 class PositionManager:
@@ -68,6 +70,22 @@ class PositionManager:
         # Stop-loss check (with small tolerance for floating point)
         if return_pct <= -self._config.sl_pct + 1e-9:
             return True, "stop_loss"
+
+        # ── Trailing stop logic ──
+        # Update high water mark if current price exceeds it
+        if current_price > position.high_water_mark:
+            position.high_water_mark = current_price
+
+        # Activate trailing stop once price has risen past activation threshold
+        activation_threshold = entry_price * (1 + self._config.trailing_stop_activation_pct)
+        if position.high_water_mark > activation_threshold - 1e-9:
+            position.trailing_activated = True
+
+        # If trailing is active, close when price drops below HWM * (1 - delta)
+        if position.trailing_activated:
+            trailing_stop_price = position.high_water_mark * (1 - self._config.trailing_stop_delta_pct)
+            if current_price < trailing_stop_price - 1e-9:
+                return True, "trailing_stop"
 
         return False, "holding"
 
@@ -135,5 +153,9 @@ class PositionManager:
         # Clamp to [0, 1]
         position.target_price = max(0.01, min(0.99, position.target_price))
         position.stop_loss_price = max(0.01, min(0.99, position.stop_loss_price))
+
+        # Initialize high water mark to entry price (don't lower it if already higher)
+        if entry > position.high_water_mark:
+            position.high_water_mark = entry
 
         return position

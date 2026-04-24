@@ -162,3 +162,95 @@ class TestRealizedPnL:
         pos = _open_yes(avg_price=0.10, size=100.0)
         pnl = PositionManager._calculate_realized_pnl(pos, exit_price=0.10)
         assert pnl == pytest.approx(0.0)
+
+
+# ── Trailing stop tests ──────────────────────────────────────
+
+class TestTrailingStop:
+    """Tests for trailing stop logic in PositionManager.should_close()."""
+
+    @pytest.fixture
+    def trail_mgr(self) -> PositionManager:
+        """Manager with trailing stop config: 15% activation, 8% delta."""
+        return PositionManager(PositionManagerConfig(
+            tp_pct=0.50,
+            sl_pct=0.50,
+            min_hold_iterations=1,
+            trailing_stop_activation_pct=0.15,
+            trailing_stop_delta_pct=0.08,
+        ))
+
+    def test_trailing_stop_activates_after_high_water_mark(self, trail_mgr):
+        """Price rises past activation threshold → trailing_activated becomes True."""
+        pos = _open_yes(avg_price=0.10, iteration=1)
+        # Entry 0.10, activation at 0.10 * 1.15 = 0.115
+        # Price at 0.12 → HWM updates to 0.12, which is > 0.115 → trailing activates
+        should, reason = trail_mgr.should_close(pos, current_price=0.12, current_iteration=5)
+        assert pos.trailing_activated is True
+        assert pos.high_water_mark == pytest.approx(0.12)
+        # Should NOT close yet (price still rising)
+        assert not should
+
+    def test_trailing_stop_follows_high_water_mark(self, trail_mgr):
+        """Price rises past activation, then drops past delta → triggers trailing_stop close."""
+        pos = _open_yes(avg_price=0.10, iteration=1)
+        # Step 1: Price rises to 0.12 → HWM=0.12, activation at 0.115 → trailing_activated=True
+        # 0.12 is 20% gain, below TP (50%)
+        trail_mgr.should_close(pos, current_price=0.12, current_iteration=5)
+        assert pos.trailing_activated is True
+        assert pos.high_water_mark == pytest.approx(0.12)
+
+        # Step 2: Price drops to 0.111 → still above 0.12 * 0.92 = 0.1104 → hold
+        should, reason = trail_mgr.should_close(pos, current_price=0.111, current_iteration=6)
+        assert not should
+
+        # Step 3: Price drops to 0.109 → below 0.12 * 0.92 = 0.1104 → trailing_stop
+        should, reason = trail_mgr.should_close(pos, current_price=0.109, current_iteration=7)
+        assert should
+        assert reason == "trailing_stop"
+
+    def test_trailing_stop_does_not_trigger_while_price_rising(self, trail_mgr):
+        """Price only rising → trailing stop should never trigger close."""
+        pos = _open_yes(avg_price=0.10, iteration=1)
+        prices_rising = [0.11, 0.115, 0.12, 0.15, 0.20, 0.30, 0.50]
+        for i, price in enumerate(prices_rising, start=5):
+            should, reason = trail_mgr.should_close(pos, current_price=price, current_iteration=i)
+            # Should never close due to trailing stop while price is rising
+            if should:
+                assert reason != "trailing_stop", f"Trailing stop triggered at price={price}"
+
+    def test_trailing_stop_high_water_mark_updates_on_each_check(self, trail_mgr):
+        """Verify HWM updates as price rises across multiple calls."""
+        pos = _open_yes(avg_price=0.10, iteration=1)
+
+        # Initially HWM should be 0 (default) or set to entry by set_targets
+        # First call: price 0.11 → HWM becomes 0.11
+        trail_mgr.should_close(pos, current_price=0.11, current_iteration=5)
+        assert pos.high_water_mark == pytest.approx(0.11)
+
+        # Second call: price 0.14 → HWM becomes 0.14
+        trail_mgr.should_close(pos, current_price=0.14, current_iteration=6)
+        assert pos.high_water_mark == pytest.approx(0.14)
+
+        # Third call: price 0.13 → HWM stays 0.14 (price dropped, HWM doesn't decrease)
+        trail_mgr.should_close(pos, current_price=0.13, current_iteration=7)
+        assert pos.high_water_mark == pytest.approx(0.14)
+
+
+class TestSetTargetsHighWaterMark:
+    """Test that set_targets() initializes high_water_mark on new positions."""
+
+    def test_set_targets_initializes_high_water_mark(self):
+        mgr = PositionManager(PositionManagerConfig())
+        pos = _open_yes(avg_price=0.10)
+        mgr.set_targets(pos)
+        assert pos.high_water_mark == pytest.approx(0.10)
+
+    def test_set_targets_does_not_overwrite_existing_high_water_mark(self):
+        """If HWM is already set higher, set_targets should not lower it."""
+        mgr = PositionManager(PositionManagerConfig())
+        pos = _open_yes(avg_price=0.10)
+        pos.high_water_mark = 0.20
+        mgr.set_targets(pos)
+        # set_targets should set HWM to entry_price (0.10), but existing higher should be kept
+        assert pos.high_water_mark == pytest.approx(0.20)

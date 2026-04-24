@@ -160,7 +160,7 @@ class TestLLMRouter:
         gemini_ok = EstimateResult(probability=0.70, confidence=0.7, source="llm_gemini")
 
         call_count = 0
-        async def mock_call(provider_name, market, news_context=""):
+        async def mock_call(provider_name, market, news_context="", *, custom_prompt=None):
             nonlocal call_count
             call_count += 1
             if provider_name == "groq":
@@ -195,7 +195,7 @@ class TestLLMRouter:
         router = LLMRouter(cfg)
 
         called_providers = []
-        async def mock_call(provider_name, market, news_context=""):
+        async def mock_call(provider_name, market, news_context="", *, custom_prompt=None):
             called_providers.append(provider_name)
             return EstimateResult(probability=0.55, confidence=0.6, source=f"llm_{provider_name}")
 
@@ -463,3 +463,92 @@ class TestParseProbability:
         # Should pick last likelihood, not first
         text = "likelihood 25% based on market.\nBut after analysis, likelihood 40%."
         assert parse_llm_probability(text) == 0.40
+
+
+# ── Bug Fix #2: custom_prompt parameter on LLMRouter ──────────────
+
+class TestLLMRouterCustomPrompt:
+    """Verify that LLMRouter.estimate() accepts a custom_prompt keyword
+    and that _call_provider uses it instead of build_superforecaster_prompt.
+    """
+
+    def _make_market(self) -> MarketInfo:
+        return MarketInfo(
+            question="Will Bitcoin reach $150k by 2026?",
+            volume=1_000_000,
+            spread=0.03,
+            current_price=0.25,
+            category="crypto",
+        )
+
+    @pytest.mark.asyncio
+    async def test_llm_router_accepts_custom_prompt(self):
+        """LLMRouter.estimate() should accept custom_prompt parameter and
+        pass it through to _call_provider."""
+        from polymarket_glm.strategy.llm_router import (
+            LLMProviderConfig,
+            LLMRouter,
+            LLMRouterConfig,
+        )
+
+        p = LLMProviderConfig(
+            name="groq", base_url="https://api.groq.com/v1", api_key="key"
+        )
+        cfg = LLMRouterConfig(providers=[p])
+        router = LLMRouter(cfg)
+
+        custom_prompt_seen: str | None = None
+
+        mock_result = EstimateResult(
+            probability=0.65, confidence=0.8, source="llm_groq"
+        )
+
+        async def mock_call_provider(provider_name, market, news_context="", *, custom_prompt=None):
+            nonlocal custom_prompt_seen
+            custom_prompt_seen = custom_prompt
+            return mock_result
+
+        router._call_provider = mock_call_provider
+
+        custom = "CUSTOM: Think about base rates first."
+        result = await router.estimate(
+            self._make_market(), news_context="", custom_prompt=custom
+        )
+
+        assert custom_prompt_seen == custom, (
+            f"custom_prompt was not passed through to _call_provider. Got: {custom_prompt_seen}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_llm_router_no_custom_prompt_uses_default(self):
+        """When custom_prompt is not provided, _call_provider should receive None."""
+        from polymarket_glm.strategy.llm_router import (
+            LLMProviderConfig,
+            LLMRouter,
+            LLMRouterConfig,
+        )
+
+        p = LLMProviderConfig(
+            name="groq", base_url="https://api.groq.com/v1", api_key="key"
+        )
+        cfg = LLMRouterConfig(providers=[p])
+        router = LLMRouter(cfg)
+
+        custom_prompt_seen: str | None = "NOT_SET"
+
+        mock_result = EstimateResult(
+            probability=0.65, confidence=0.8, source="llm_groq"
+        )
+
+        async def mock_call_provider(provider_name, market, news_context="", *, custom_prompt=None):
+            nonlocal custom_prompt_seen
+            custom_prompt_seen = custom_prompt
+            return mock_result
+
+        router._call_provider = mock_call_provider
+
+        result = await router.estimate(self._make_market())
+
+        assert custom_prompt_seen is None, (
+            f"custom_prompt should be None when not provided. Got: {custom_prompt_seen}"
+        )

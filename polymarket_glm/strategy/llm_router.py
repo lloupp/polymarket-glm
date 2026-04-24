@@ -518,11 +518,17 @@ class LLMRouter:
             key=lambda p: p.priority,
         )
 
-    async def estimate(self, market: MarketInfo, news_context: str = "") -> EstimateResult:
+    async def estimate(self, market: MarketInfo, news_context: str = "", *, custom_prompt: str | None = None) -> EstimateResult:
         """Estimate probability using multi-provider LLM with fallback.
 
         Tries each provider in priority order. Skips rate-limited providers.
         Returns first successful result, or fallback if all fail.
+
+        Args:
+            market: Market information for estimation.
+            news_context: Relevant news context string.
+            custom_prompt: If provided, use this prompt instead of the default
+                build_superforecaster_prompt(). Used by ensemble paraphrase templates.
         """
         providers = self._sorted_providers()
         if not providers:
@@ -541,7 +547,7 @@ class LLMRouter:
                 continue
 
             for attempt in range(self._config.max_retries_per_provider):
-                result = await self._call_provider(provider.name, market, news_context)
+                result = await self._call_provider(provider.name, market, news_context, custom_prompt=custom_prompt)
                 if result.confidence > 0:
                     if tracker:
                         tracker.record_call()
@@ -568,11 +574,20 @@ class LLMRouter:
         provider_name: str,
         market: MarketInfo,
         news_context: str = "",
+        *,
+        custom_prompt: str | None = None,
     ) -> EstimateResult:
         """Call a specific LLM provider and parse the result.
 
         Uses OpenAI-compatible API (all free providers support this format).
         For providers with enable_web_search=True, adds web_search tool.
+
+        Args:
+            provider_name: Name of the provider to call.
+            market: Market information for estimation.
+            news_context: Relevant news context string.
+            custom_prompt: If provided, use this prompt instead of the default
+                build_superforecaster_prompt(). Used by ensemble paraphrase templates.
         """
         provider = next(
             (p for p in self._config.providers if p.name == provider_name),
@@ -590,7 +605,10 @@ class LLMRouter:
             client = self._get_client(provider)
 
             # Use structured JSON prompt for web_search providers
-            if provider.enable_web_search:
+            if custom_prompt:
+                prompt = custom_prompt
+                system_prompt = SUPERFORECASTER_SYSTEM_PROMPT
+            elif provider.enable_web_search:
                 prompt = _build_web_search_prompt(market)
                 system_prompt = WEB_SEARCH_SYSTEM_PROMPT
             else:
