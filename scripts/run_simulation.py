@@ -657,17 +657,18 @@ class SimulationEngine:
         if verdict != RiskVerdict.ALLOW:
             logger.info("⛔ Risk rejected: %s (%s)", verdict.value, reason)
             return "rejected"
-                # Execute (paper)
-            # In Polymarket, SELL YES without position = BUY NO instead
-            if signal.signal_type == SignalType.SELL:
-                side = Side.BUY
-                outcome = "No"
-                price = 1.0 - signal.market_price
-            else:
-                side = Side.BUY
-                outcome = signal.outcome
-                price = signal.market_price
+        # Execute (paper)
+        # In Polymarket, SELL YES without position = BUY NO instead
+        if signal.signal_type == SignalType.SELL:
+            side = Side.BUY
+            outcome = "No"
+            price = 1.0 - signal.market_price
+        else:
+            side = Side.BUY
+            outcome = signal.outcome
+            price = signal.market_price
 
+        # Mapeamento SELL -> BUY NO está funcionando corretamente
         order = OrderRequest(
             market_id=signal.market_id,
             side=side,
