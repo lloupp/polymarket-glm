@@ -422,7 +422,7 @@ class LLMProviderConfig(BaseModel):
     enable_web_search: bool = False  # MiniMax web search support
 
 
-class LLMRouterConfig(BaseModel):
+class LLMRouterRuntimeConfig(BaseModel):
     """Configuration for the LLM router (all providers + global settings)."""
     providers: list[LLMProviderConfig] = []
     max_retries_per_provider: int = 2
@@ -491,7 +491,7 @@ class LLMRouter:
     providers, trying them in priority order with rate limit awareness.
 
     Usage:
-        config = LLMRouterConfig(providers=[
+        config = LLMRouterRuntimeConfig(providers=[
             LLMProviderConfig(name="groq", base_url="...", api_key="..."),
             LLMProviderConfig(name="gemini", base_url="...", api_key="..."),
         ])
@@ -499,7 +499,7 @@ class LLMRouter:
         result = await router.estimate(market_info)
     """
 
-    def __init__(self, config: LLMRouterConfig):
+    def __init__(self, config: LLMRouterRuntimeConfig):
         self._config = config
         self._trackers: dict[str, RateLimitTracker] = {}
         self._clients: dict[str, object] = {}  # lazy-init OpenAI clients
@@ -508,7 +508,7 @@ class LLMRouter:
             self._trackers[p.name] = RateLimitTracker(rpm=p.rpm, rpd=p.rpd)
 
     @property
-    def config(self) -> LLMRouterConfig:
+    def config(self) -> LLMRouterRuntimeConfig:
         return self._config
 
     def _sorted_providers(self) -> list[LLMProviderConfig]:

@@ -49,12 +49,12 @@ class TestProviderConfig:
             LLMProviderConfig()  # missing required fields
 
 
-class TestLLMRouterConfig:
-    """Tests for LLMRouterConfig model."""
+class TestLLMRouterRuntimeConfig:
+    """Tests for LLMRouterRuntimeConfig model."""
 
     def test_defaults(self):
-        from polymarket_glm.strategy.llm_router import LLMRouterConfig
-        cfg = LLMRouterConfig()
+        from polymarket_glm.strategy.llm_router import LLMRouterRuntimeConfig
+        cfg = LLMRouterRuntimeConfig()
         assert cfg.providers == []
         assert cfg.max_retries_per_provider == 2
         assert cfg.timeout_sec == 30.0
@@ -62,10 +62,10 @@ class TestLLMRouterConfig:
         assert cfg.max_tokens == 500
 
     def test_with_providers(self):
-        from polymarket_glm.strategy.llm_router import LLMProviderConfig, LLMRouterConfig
+        from polymarket_glm.strategy.llm_router import LLMProviderConfig, LLMRouterRuntimeConfig
         p1 = LLMProviderConfig(name="groq", base_url="https://api.groq.com/v1")
         p2 = LLMProviderConfig(name="gemini", base_url="https://example.com", priority=2)
-        cfg = LLMRouterConfig(providers=[p1, p2])
+        cfg = LLMRouterRuntimeConfig(providers=[p1, p2])
         assert len(cfg.providers) == 2
         assert cfg.providers[0].name == "groq"
 
@@ -136,9 +136,9 @@ class TestLLMRouter:
 
     @pytest.mark.asyncio
     async def test_first_provider_succeeds(self):
-        from polymarket_glm.strategy.llm_router import LLMProviderConfig, LLMRouter, LLMRouterConfig
+        from polymarket_glm.strategy.llm_router import LLMProviderConfig, LLMRouter, LLMRouterRuntimeConfig
         p = LLMProviderConfig(name="groq", base_url="https://api.groq.com/v1", api_key="key")
-        cfg = LLMRouterConfig(providers=[p])
+        cfg = LLMRouterRuntimeConfig(providers=[p])
 
         router = LLMRouter(cfg)
         mock_result = EstimateResult(probability=0.65, confidence=0.8, source="llm_groq")
@@ -150,10 +150,10 @@ class TestLLMRouter:
 
     @pytest.mark.asyncio
     async def test_fallback_on_failure(self):
-        from polymarket_glm.strategy.llm_router import LLMProviderConfig, LLMRouter, LLMRouterConfig
+        from polymarket_glm.strategy.llm_router import LLMProviderConfig, LLMRouter, LLMRouterRuntimeConfig
         p1 = LLMProviderConfig(name="groq", base_url="https://api.groq.com/v1", api_key="k1")
         p2 = LLMProviderConfig(name="gemini", base_url="https://example.com", api_key="k2", priority=2)
-        cfg = LLMRouterConfig(providers=[p1, p2])
+        cfg = LLMRouterRuntimeConfig(providers=[p1, p2])
 
         router = LLMRouter(cfg)
         groq_fail = EstimateResult(probability=0.5, confidence=0.0, source="llm_fallback", reasoning="Error: timeout")
@@ -175,9 +175,9 @@ class TestLLMRouter:
 
     @pytest.mark.asyncio
     async def test_all_fail_returns_fallback(self):
-        from polymarket_glm.strategy.llm_router import LLMProviderConfig, LLMRouter, LLMRouterConfig
+        from polymarket_glm.strategy.llm_router import LLMProviderConfig, LLMRouter, LLMRouterRuntimeConfig
         p = LLMProviderConfig(name="groq", base_url="https://api.groq.com/v1", api_key="k1")
-        cfg = LLMRouterConfig(providers=[p])
+        cfg = LLMRouterRuntimeConfig(providers=[p])
         router = LLMRouter(cfg)
 
         fail = EstimateResult(probability=0.5, confidence=0.0, source="llm_fallback", reasoning="Error: 429")
@@ -188,10 +188,10 @@ class TestLLMRouter:
 
     @pytest.mark.asyncio
     async def test_rate_limited_provider_skipped(self):
-        from polymarket_glm.strategy.llm_router import LLMProviderConfig, LLMRouter, LLMRouterConfig
+        from polymarket_glm.strategy.llm_router import LLMProviderConfig, LLMRouter, LLMRouterRuntimeConfig
         p1 = LLMProviderConfig(name="groq", base_url="https://api.groq.com/v1", api_key="k1", rpm=0)
         p2 = LLMProviderConfig(name="gemini", base_url="https://example.com", api_key="k2", priority=2)
-        cfg = LLMRouterConfig(providers=[p1, p2])
+        cfg = LLMRouterRuntimeConfig(providers=[p1, p2])
         router = LLMRouter(cfg)
 
         called_providers = []
@@ -207,8 +207,8 @@ class TestLLMRouter:
 
     @pytest.mark.asyncio
     async def test_no_providers_returns_fallback(self):
-        from polymarket_glm.strategy.llm_router import LLMRouter, LLMRouterConfig
-        cfg = LLMRouterConfig(providers=[])
+        from polymarket_glm.strategy.llm_router import LLMRouter, LLMRouterRuntimeConfig
+        cfg = LLMRouterRuntimeConfig(providers=[])
         router = LLMRouter(cfg)
         result = await router.estimate(self._make_market())
         assert result.probability == 0.5

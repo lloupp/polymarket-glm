@@ -26,7 +26,7 @@ from polymarket_glm.config import Settings, ExecutionMode
 from polymarket_glm.ingestion.market_fetcher import MarketFetcher, MarketFilter
 from polymarket_glm.ingestion.price_feed import PriceFeed
 from polymarket_glm.strategy.signal_engine import SignalEngine, SignalType
-from polymarket_glm.strategy.llm_router import LLMRouter, LLMRouterConfig as RouterConfig, LLMProviderConfig
+from polymarket_glm.strategy.llm_router import LLMRouter, LLMRouterRuntimeConfig as RouterConfig, LLMProviderConfig
 from polymarket_glm.strategy.context_fetcher import ContextBuilder, ContextBuilderConfig
 from polymarket_glm.risk.controller import RiskController, RiskVerdict
 from polymarket_glm.execution.paper_executor import PaperExecutor

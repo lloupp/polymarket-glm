@@ -52,9 +52,14 @@ class MarketInfo(BaseModel):
 
 @runtime_checkable
 class ProbabilityEstimator(Protocol):
-    """Protocol for probability estimators — any plug-compatible estimator."""
+    """Protocol for probability estimators — any async plug-compatible estimator.
 
-    def estimate(self, market: MarketInfo) -> EstimateResult:
+    All estimators MUST implement 'async def estimate()' — the async protocol
+    is required because LLM API calls are inherently async. Sync estimators
+    will NOT satisfy this protocol and will fail at runtime.
+    """
+
+    async def estimate(self, market: MarketInfo) -> EstimateResult:
         """Produce a probability estimate for the given market."""
         ...
 
@@ -80,7 +85,7 @@ class HeuristicEstimator:
     VOLUME_MED = 50_000.0
     VOLUME_HIGH = 500_000.0
 
-    def estimate(self, market: MarketInfo) -> EstimateResult:
+    async def estimate(self, market: MarketInfo) -> EstimateResult:
         """Produce a heuristic probability estimate."""
         # ── 1. Base probability from market price ──
         base_prob = market.current_price if market.current_price is not None else 0.5

@@ -18,7 +18,7 @@ class FixedEstimator(ProbabilityEstimator):
     def __init__(self, prob: float):
         self._prob = prob
 
-    def estimate(self, market: MarketInfo) -> EstimateResult:
+    async def estimate(self, market: MarketInfo) -> EstimateResult:
         return EstimateResult(
             probability=self._prob,
             confidence=0.8,
@@ -39,7 +39,7 @@ def _market(price: float = 0.5, volume: float = 100_000) -> dict:
     }
 
 
-def test_backtest_config_defaults():
+async def test_backtest_config_defaults():
     """BacktestConfig should have sensible defaults."""
     config = BacktestConfig()
     assert config.initial_capital > 0
@@ -47,7 +47,7 @@ def test_backtest_config_defaults():
     assert config.fee_bps >= 0
 
 
-def test_backtest_single_profitable_trade():
+async def test_backtest_single_profitable_trade():
     """A trade that wins should show positive PnL."""
     engine = BacktestEngine(
         config=BacktestConfig(initial_capital=1000.0),
@@ -57,13 +57,13 @@ def test_backtest_single_profitable_trade():
         {"current_price": 0.50, "resolved_outcome": True, "volume": 100_000,
          "liquidity": 50_000, "spread": 0.02, "category": "test", "question": "Q1"},
     ]
-    result = engine.run(snapshots)
+    result = await engine.run(snapshots)
     assert isinstance(result, BacktestResult)
     assert result.total_trades >= 0
     assert result.final_capital >= 0
 
 
-def test_backtest_metrics_computed():
+async def test_backtest_metrics_computed():
     """Result should include win rate, Sharpe, max drawdown."""
     engine = BacktestEngine(
         config=BacktestConfig(initial_capital=1000.0),
@@ -76,13 +76,13 @@ def test_backtest_metrics_computed():
          "category": "test", "question": f"Q{i}"}
         for i in range(10)
     ]
-    result = engine.run(snapshots)
+    result = await engine.run(snapshots)
     assert 0 <= result.win_rate <= 1
     assert result.max_drawdown >= 0
     assert result.final_capital > 0
 
 
-def test_backtest_no_trades_when_edge_low():
+async def test_backtest_no_trades_when_edge_low():
     """When estimated prob ≈ market price, no edge → no trade."""
     engine = BacktestEngine(
         config=BacktestConfig(initial_capital=1000.0, min_edge=0.10),
@@ -93,11 +93,11 @@ def test_backtest_no_trades_when_edge_low():
          "volume": 100_000, "liquidity": 50_000, "spread": 0.02,
          "category": "test", "question": "Q1"},
     ]
-    result = engine.run(snapshots)
+    result = await engine.run(snapshots)
     assert result.total_trades == 0
 
 
-def test_backtest_drawdown_calculation():
+async def test_backtest_drawdown_calculation():
     """Max drawdown should be correctly computed from equity curve."""
     engine = BacktestEngine(
         config=BacktestConfig(initial_capital=1000.0),
@@ -112,12 +112,12 @@ def test_backtest_drawdown_calculation():
          "volume": 50_000, "liquidity": 20_000, "spread": 0.10,
          "category": "test", "question": "Loss"},
     ]
-    result = engine.run(snapshots)
+    result = await engine.run(snapshots)
     assert result.max_drawdown >= 0
     assert len(result.equity_curve) > 0
 
 
-def test_backtest_fees_deducted():
+async def test_backtest_fees_deducted():
     """Fees should be deducted from PnL."""
     engine_no_fee = BacktestEngine(
         config=BacktestConfig(initial_capital=1000.0, fee_bps=0),
@@ -132,13 +132,13 @@ def test_backtest_fees_deducted():
          "volume": 100_000, "liquidity": 50_000, "spread": 0.02,
          "category": "test", "question": "Q1"},
     ]
-    r_no_fee = engine_no_fee.run(snapshots)
-    r_with_fee = engine_with_fee.run(snapshots)
+    r_no_fee = await engine_no_fee.run(snapshots)
+    r_with_fee = await engine_with_fee.run(snapshots)
     # With fees, final capital should be <= without fees
     assert r_with_fee.final_capital <= r_no_fee.final_capital
 
 
-def test_backtest_trade_record():
+async def test_backtest_trade_record():
     """BacktestTrade should record entry/exit details."""
     trade = BacktestTrade(
         market_question="Will X?",
@@ -153,7 +153,7 @@ def test_backtest_trade_record():
     assert trade.side == "BUY"
 
 
-def test_backtest_result_serialization():
+async def test_backtest_result_serialization():
     """BacktestResult should be serializable."""
     engine = BacktestEngine(
         config=BacktestConfig(initial_capital=500.0),
@@ -164,7 +164,7 @@ def test_backtest_result_serialization():
          "volume": 100_000, "liquidity": 50_000, "spread": 0.02,
          "category": "test", "question": "Q1"},
     ]
-    result = engine.run(snapshots)
+    result = await engine.run(snapshots)
     data = result.model_dump()
     assert "final_capital" in data
     assert "total_trades" in data

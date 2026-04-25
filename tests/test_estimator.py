@@ -11,7 +11,7 @@ from polymarket_glm.strategy.estimator import (
 
 # ── EstimateResult ──
 
-def test_estimate_result_defaults():
+async def test_estimate_result_defaults():
     """EstimateResult should have sensible defaults."""
     r = EstimateResult(probability=0.65)
     assert r.probability == 0.65
@@ -20,7 +20,7 @@ def test_estimate_result_defaults():
     assert 0 <= r.probability <= 1
 
 
-def test_estimate_result_invalid_prob():
+async def test_estimate_result_invalid_prob():
     """Probability outside [0,1] should raise."""
     with pytest.raises(Exception):
         EstimateResult(probability=1.5)
@@ -30,7 +30,7 @@ def test_estimate_result_invalid_prob():
 
 # ── MarketInfo ──
 
-def test_market_info_creation():
+async def test_market_info_creation():
     """MarketInfo should store market metadata."""
     mi = MarketInfo(
         question="Will X happen by 2026?",
@@ -47,7 +47,7 @@ def test_market_info_creation():
 
 # ── Protocol compliance ──
 
-def test_heuristic_estimator_satisfies_protocol():
+async def test_heuristic_estimator_satisfies_protocol():
     """HeuristicEstimator should implement ProbabilityEstimator protocol."""
     estimator = HeuristicEstimator()
     # Protocol check — method must exist
@@ -57,7 +57,7 @@ def test_heuristic_estimator_satisfies_protocol():
 
 # ── HeuristicEstimator ──
 
-def test_heuristic_volume_signal():
+async def test_heuristic_volume_signal():
     """High volume markets should nudge probability toward market price."""
     estimator = HeuristicEstimator()
     mi = MarketInfo(
@@ -68,13 +68,13 @@ def test_heuristic_volume_signal():
         current_price=0.72,
         category="crypto",
     )
-    result = estimator.estimate(mi)
+    result = await estimator.estimate(mi)
     assert 0 < result.probability < 1
     assert result.source == "heuristic"
     assert result.confidence > 0
 
 
-def test_heuristic_low_volume_low_confidence():
+async def test_heuristic_low_volume_low_confidence():
     """Low volume markets should yield low confidence."""
     estimator = HeuristicEstimator()
     mi = MarketInfo(
@@ -85,12 +85,12 @@ def test_heuristic_low_volume_low_confidence():
         current_price=0.50,
         category="other",
     )
-    result = estimator.estimate(mi)
+    result = await estimator.estimate(mi)
     assert result.confidence < 0.5
     assert result.source == "heuristic"
 
 
-def test_heuristic_wide_spread_adjusts_probability():
+async def test_heuristic_wide_spread_adjusts_probability():
     """Wide spread should pull probability toward 0.5 (uncertainty)."""
     estimator = HeuristicEstimator()
     mi_tight = MarketInfo(
@@ -109,13 +109,13 @@ def test_heuristic_wide_spread_adjusts_probability():
         current_price=0.80,
         category="politics",
     )
-    r_tight = estimator.estimate(mi_tight)
-    r_wide = estimator.estimate(mi_wide)
+    r_tight = await estimator.estimate(mi_tight)
+    r_wide = await estimator.estimate(mi_wide)
     # Wide spread should pull toward 0.5
     assert abs(r_wide.probability - 0.5) < abs(r_tight.probability - 0.5)
 
 
-def test_heuristic_no_price_defaults_to_0_5():
+async def test_heuristic_no_price_defaults_to_0_5():
     """No current_price should default to 0.5 (maximum uncertainty)."""
     estimator = HeuristicEstimator()
     mi = MarketInfo(
@@ -124,12 +124,12 @@ def test_heuristic_no_price_defaults_to_0_5():
         liquidity=0.0,
         spread=1.0,
     )
-    result = estimator.estimate(mi)
+    result = await estimator.estimate(mi)
     assert result.probability == 0.5
     assert result.confidence == 0.0
 
 
-def test_heuristic_recency_boost():
+async def test_heuristic_recency_boost():
     """Markets with end_date far in future should have slightly higher confidence."""
     estimator = HeuristicEstimator()
     mi_near = MarketInfo(
@@ -148,13 +148,13 @@ def test_heuristic_recency_boost():
         current_price=0.60,
         end_date="2027-04-22",
     )
-    r_near = estimator.estimate(mi_near)
-    r_far = estimator.estimate(mi_far)
+    r_near = await estimator.estimate(mi_near)
+    r_far = await estimator.estimate(mi_far)
     # Near events have more information → should have higher confidence
     assert r_near.confidence >= r_far.confidence
 
 
-def test_heuristic_category_adjustment():
+async def test_heuristic_category_adjustment():
     """Known categories should have a slight confidence boost."""
     estimator = HeuristicEstimator()
     mi_known = MarketInfo(
@@ -173,6 +173,6 @@ def test_heuristic_category_adjustment():
         current_price=0.55,
         category="obscure_category_xyz",
     )
-    r_known = estimator.estimate(mi_known)
-    r_unknown = estimator.estimate(mi_unknown)
+    r_known = await estimator.estimate(mi_known)
+    r_unknown = await estimator.estimate(mi_unknown)
     assert r_known.confidence >= r_unknown.confidence

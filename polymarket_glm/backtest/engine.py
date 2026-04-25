@@ -83,7 +83,7 @@ class BacktestEngine:
         self._estimator = estimator
         self._signal_engine = SignalEngine(kelly_fraction=self._config.kelly_fraction)
 
-    def run(self, snapshots: list[dict[str, Any]]) -> BacktestResult:
+    async def run(self, snapshots: list[dict[str, Any]]) -> BacktestResult:
         """Run backtest over a list of market snapshots.
 
         Each snapshot should have:
@@ -109,7 +109,7 @@ class BacktestEngine:
                 continue
 
             # Get estimate
-            estimate = self._estimator.estimate(market)
+            estimate = await self._estimator.estimate(market)
 
             # Compute edge
             edge = abs(estimate.probability - price)
