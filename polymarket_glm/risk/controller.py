@@ -10,8 +10,10 @@ implementation in the Polymarket ecosystem. Ported and improved with:
 from __future__ import annotations
 
 import enum
+import json
 import logging
 import time
+from pathlib import Path
 from collections import defaultdict
 
 from pydantic import BaseModel
@@ -74,6 +76,7 @@ class RiskController:
                 return RiskVerdict.KILL_SWITCH, f"Kill switch active: {self._kill_switch_reason}"
             # Cooldown expired — deactivate
             self._kill_switch_active = False
+            self._clear_kill_switch_file()
             logger.info("Kill switch cooldown expired — re-enabling trading")
 
         # 2. Per-trade limit
@@ -152,13 +155,61 @@ class RiskController:
         self._kill_switch_active = True
         self._kill_switch_reason = reason
         self._kill_switch_at = time.monotonic()
+        self._persist_kill_switch()
         logger.critical("🚨 KILL SWITCH ACTIVATED: %s", reason)
 
     def deactivate_kill_switch(self) -> None:
         """Manually deactivate the kill switch (overrides cooldown)."""
         self._kill_switch_active = False
         self._kill_switch_reason = ""
+        self._clear_kill_switch_file()
         logger.info("Kill switch manually deactivated")
+
+    def _persist_kill_switch(self) -> None:
+        """Write kill switch state to disk so it survives restarts."""
+        try:
+            self.KILL_SWITCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self.KILL_SWITCH_FILE.write_text(json.dumps({
+                "active": True,
+                "reason": self._kill_switch_reason,
+                "activated_at": time.time(),
+            }))
+        except Exception as exc:
+            logger.warning("Failed to persist kill switch: %s", exc)
+
+    def _clear_kill_switch_file(self) -> None:
+        """Remove kill switch flag file."""
+        try:
+            if self.KILL_SWITCH_FILE.exists():
+                self.KILL_SWITCH_FILE.unlink()
+        except Exception as exc:
+            logger.warning("Failed to clear kill switch file: %s", exc)
+
+    def _restore_kill_switch(self) -> None:
+        """Restore kill switch state from disk on startup."""
+        try:
+            if not self.KILL_SWITCH_FILE.exists():
+                return
+            data = json.loads(self.KILL_SWITCH_FILE.read_text())
+            if data.get("active"):
+                activated_at = data.get("activated_at", 0)
+                elapsed = time.time() - activated_at
+                # If within cooldown, restore the kill switch
+                if elapsed < self._config.kill_switch_cooldown_sec:
+                    self._kill_switch_active = True
+                    self._kill_switch_reason = data.get("reason", "Persisted from previous session")
+                    self._kill_switch_at = time.monotonic() - elapsed
+                    logger.warning(
+                        "🔄 Kill switch restored from previous session: %s (%.0fs remaining)",
+                        self._kill_switch_reason,
+                        self._config.kill_switch_cooldown_sec - elapsed,
+                    )
+                else:
+                    # Cooldown expired while we were down — clear the file
+                    self._clear_kill_switch_file()
+                    logger.info("Kill switch cooldown expired while offline — re-enabling trading")
+        except Exception as exc:
+            logger.warning("Failed to restore kill switch: %s", exc)
 
     def reset_daily(self) -> None:
         """Reset daily loss counter (call at start of new trading day)."""

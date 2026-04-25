@@ -34,6 +34,7 @@ from polymarket_glm.execution.exchange import OrderRequest
 from polymarket_glm.execution.portfolio_tracker import PortfolioTracker
 from polymarket_glm.execution.settlement_tracker import SettlementTracker
 from polymarket_glm.execution.position_manager import PositionManager, PositionManagerConfig
+from polymarket_glm.storage.database import Database
 from polymarket_glm.monitoring.alerts import AlertManager, Alert, AlertLevel
 from polymarket_glm.monitoring.daily_report import format_daily_report, format_pnl_alert
 from polymarket_glm.ops.telegram_bot import TelegramBot
@@ -173,6 +174,7 @@ class SimulationEngine:
 
         # Telegram bot for alerts
         self._bot: TelegramBot | None = None
+        self._db: Database | None = None
         self._alert_mgr: AlertManager | None = None
         if settings.telegram_alert_token and settings.telegram_alert_chat_id:
             self._bot = TelegramBot(
@@ -204,6 +206,13 @@ class SimulationEngine:
 
     # ── Providers for Telegram bot ──────────────────────────
 
+
+    def _ensure_db(self) -> Database:
+        """Lazy-init database for signal/trade persistence."""
+        if self._db is None:
+            self._db = Database()
+            self._db.initialize()
+        return self._db
     def _status_provider(self) -> dict:
         acct = self._executor.account
         pnl_data = {}
@@ -676,6 +685,29 @@ class SimulationEngine:
                 "✅ Filled: %s %s $%.2f @ %.4f",
                 side.value, signal.outcome, signal.size_usd, signal.market_price,
             )
+            try:
+                db = self._ensure_db()
+                db.save_trade(
+                    trade_id=fill.order_id,
+                    market_id=signal.market_id,
+                    side=side.value,
+                    outcome=signal.outcome,
+                    price=signal.market_price,
+                    size=signal.size_usd / signal.market_price if signal.market_price > 0 else 0,
+                    fee=signal.size_usd * 0.01,  # 1% paper fee
+                )
+                db.save_signal(
+                    market_id=signal.market_id,
+                    signal_type=signal.signal_type.value,
+                    edge=signal.edge,
+                    estimated_prob=signal.estimated_prob,
+                    market_price=signal.market_price,
+                    size_usd=signal.size_usd,
+                    kelly_raw=signal.kelly_raw,
+                    kelly_sized=signal.kelly_sized,
+                )
+            except Exception as exc:
+                logger.warning("DB record failed: %s", exc)
 
             # Set TP/SL targets on the new position
             pos = self._executor.get_position(signal.market_id, outcome)

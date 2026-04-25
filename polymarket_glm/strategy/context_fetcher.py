@@ -17,6 +17,12 @@ from typing import Protocol
 import httpx
 from pydantic import BaseModel, Field
 
+try:
+    import feedparser
+    HAS_FEEDPARSER = True
+except ImportError:
+    HAS_FEEDPARSER = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -269,6 +275,118 @@ class WebSearcher:
         return results
 
 
+
+# ── RSS Fallback ──────────────────────────────────────────────────
+
+
+class RSSFetcherConfig(BaseModel):
+    """Configuration for RSS news fallback (no API key required).
+
+    Uses Google News RSS feeds — 100% free, no rate limits, no signup.
+    Falls back automatically when NewsAPI/Tavily are rate-limited.
+    """
+    enabled: bool = True
+    base_url: str = "https://news.google.com/rss/search"
+    max_articles: int = 5
+    timeout_sec: float = 10.0
+
+    @property
+    def is_available(self) -> bool:
+        return self.enabled and HAS_FEEDPARSER
+
+
+class RSSFetcher:
+    """Fetch news via Google News RSS — no API key, no rate limits.
+
+    This is the fallback when NewsAPI/Tavily are rate-limited or unavailable.
+    Uses feedparser to parse RSS feeds. Google News RSS supports keyword
+    search queries and returns recent, relevant articles.
+
+    Rate limit: Google News RSS is effectively unlimited for reasonable use.
+    """
+
+    def __init__(self, config: RSSFetcherConfig | None = None):
+        self.config = config or RSSFetcherConfig()
+
+    @property
+    def is_available(self) -> bool:
+        return self.config.is_available
+
+    async def fetch(self, question: str) -> list[NewsArticle]:
+        """Fetch RSS news articles relevant to a market question.
+
+        Returns empty list if feedparser not installed or on any error.
+        """
+        if not self.is_available:
+            return []
+
+        query = self._build_query(question)
+        if not query:
+            return []
+
+        try:
+            url = f"{self.config.base_url}?q={httpx.URL(query, quote=True)}&hl=en-US&gl=US&ceid=US:en"
+            async with httpx.AsyncClient(timeout=self.config.timeout_sec) as client:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    logger.debug("RSS fetch returned %d", resp.status_code)
+                    return []
+
+            # feedparser parses from string
+            feed = feedparser.parse(resp.text)
+            return self._parse_entries(feed.entries)
+
+        except Exception as exc:
+            logger.debug("RSSFetcher error: %s", exc)
+            return []
+
+    def _build_query(self, question: str) -> str:
+        """Extract search keywords from market question for RSS."""
+        # Remove common prefixes
+        q = re.sub(
+            r"^(Will|Is|Does|Has|Are|Can|Do|Did|Could|Should|May|Might)\s+",
+            "", question, flags=re.IGNORECASE,
+        )
+        q = q.rstrip("?").rstrip(".").strip()
+
+        # Remove time qualifiers
+        fillers = [
+            r"\bbefore\s+\S+",
+            r"\bby\s+(the\s+)?end\s+of\b.*",
+            r"\bin\s+\d{4}\b",
+            r"\bby\s+\w+\s+\d{1,2}.*",
+            r"\bbefore\s+\w+\s+\d{1,2}.*",
+        ]
+        for pattern in fillers:
+            q = re.sub(pattern, "", q, flags=re.IGNORECASE).strip()
+
+        words = q.split()
+        return " ".join(words[:5]) if words else question[:60]
+
+    def _parse_entries(self, entries: list) -> list[NewsArticle]:
+        """Parse feedparser entries into NewsArticle models."""
+        articles = []
+        for entry in entries[:self.config.max_articles]:
+            title = getattr(entry, "title", "")
+            if not title:
+                continue
+            source = getattr(entry, "source", {})
+            source_name = source.get("title", "RSS") if isinstance(source, dict) else "RSS"
+            published = getattr(entry, "published", "")
+            description = getattr(entry, "summary", "")
+            # Clean HTML from description
+            description = re.sub(r"<[^>]+>", "", description)[:200]
+            url = getattr(entry, "link", "")
+
+            articles.append(NewsArticle(
+                title=title,
+                source=source_name,
+                published_at=published,
+                description=description,
+                url=url,
+            ))
+        return articles
+
 # ── ContextBuilder ────────────────────────────────────────────────
 
 class ContextBuilderConfig(BaseModel):
@@ -286,27 +404,37 @@ class ContextBuilderConfig(BaseModel):
 
 
 class ContextBuilder:
-    """Aggregate news + web search into a formatted context string.
+    """Aggregate news + web search + RSS into a formatted context string.
 
     The context is injected into the Superforecaster prompt to provide
     real-time information that improves LLM probability estimation.
+
+    Priority: NewsAPI → Tavily → RSS (Google News fallback).
+    RSS is always available (no API key) and serves as fallback
+    when paid APIs hit rate limits.
     """
 
     def __init__(self, config: ContextBuilderConfig):
         self.config = config
         self._news_fetcher = NewsFetcher(config.news_fetcher)
         self._web_searcher = WebSearcher(config.web_searcher)
+        self._rss_fetcher = RSSFetcher()  # Always available, no config needed
 
     @property
     def has_any_source(self) -> bool:
         """Check if at least one context source is available."""
-        return self._news_fetcher.is_enabled or self._web_searcher.is_enabled
+        return (
+            self._news_fetcher.is_enabled
+            or self._web_searcher.is_enabled
+            or self._rss_fetcher.is_available
+        )
 
     async def fetch_context(self, question: str) -> str:
         """Fetch news + search context for a market question.
 
-        Runs both fetchers concurrently. Returns formatted context
-        string, or empty string if nothing available.
+        Priority: NewsAPI → Tavily → RSS (Google News fallback).
+        RSS is always available as fallback when APIs are rate-limited.
+        Returns formatted context string, or empty string if nothing available.
         """
         news_articles: list[NewsArticle] = []
         search_results: list[WebSearchResult] = []
@@ -318,10 +446,24 @@ class ContextBuilder:
         if self._web_searcher.is_enabled:
             search_results = await self._safe_search_web(question)
 
+        # Fallback to RSS if APIs returned nothing (rate-limited, disabled, etc.)
+        if not news_articles and not search_results and self._rss_fetcher.is_available:
+            news_articles = await self._safe_fetch_rss(question)
+            if news_articles:
+                logger.debug("RSS fallback: %d articles for '%s'", len(news_articles), question[:40])
+
         if not news_articles and not search_results:
             return ""
 
         return self.build_context(news_articles, search_results)
+
+    async def _safe_fetch_rss(self, question: str) -> list[NewsArticle]:
+        """Fetch RSS with error handling."""
+        try:
+            return await self._rss_fetcher.fetch(question)
+        except Exception as exc:
+            logger.warning("RSSFetcher failed: %s", exc)
+            return []
 
     async def _safe_fetch_news(self, question: str) -> list[NewsArticle]:
         """Fetch news with error handling."""

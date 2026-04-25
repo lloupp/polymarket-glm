@@ -12,6 +12,7 @@ dependencies = [
     "websockets>=12.0",
     "click>=8.0",
     "openai>=2.32.0",
+    "feedparser>=6.0",
 ]
 
 [project.optional-dependencies]
