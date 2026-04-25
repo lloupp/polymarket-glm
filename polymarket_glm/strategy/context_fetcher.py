@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+from urllib.parse import quote_plus
 from typing import Protocol
 
 import httpx
@@ -325,7 +326,7 @@ class RSSFetcher:
             return []
 
         try:
-            url = f"{self.config.base_url}?q={httpx.URL(query, quote=True)}&hl=en-US&gl=US&ceid=US:en"
+            url = f"{self.config.base_url}?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
             async with httpx.AsyncClient(timeout=self.config.timeout_sec) as client:
                 resp = await client.get(url)
                 if resp.status_code != 200:
@@ -450,7 +451,7 @@ class ContextBuilder:
         if not news_articles and not search_results and self._rss_fetcher.is_available:
             news_articles = await self._safe_fetch_rss(question)
             if news_articles:
-                logger.debug("RSS fallback: %d articles for '%s'", len(news_articles), question[:40])
+                logger.info("📡 RSS fallback: %d articles for '%s'", len(news_articles), question[:40])
 
         if not news_articles and not search_results:
             return ""

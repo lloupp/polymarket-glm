@@ -480,7 +480,8 @@ class TestContextBuilder:
         context_builder._web_searcher.config.api_key = "fake-key"
 
         with patch.object(context_builder._news_fetcher, "fetch", AsyncMock(side_effect=Exception("NewsAPI down"))), \
-             patch.object(context_builder._web_searcher, "search", AsyncMock(side_effect=Exception("Tavily down"))):
+             patch.object(context_builder._web_searcher, "search", AsyncMock(side_effect=Exception("Tavily down"))), \
+        patch.object(context_builder._rss_fetcher, "fetch", AsyncMock(return_value=[])):
             ctx = await context_builder.fetch_context("Will it rain?")
             assert ctx == ""
 
