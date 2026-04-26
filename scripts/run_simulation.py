@@ -692,7 +692,7 @@ class SimulationEngine:
                     trade_id=fill.order_id,
                     market_id=signal.market_id,
                     side=side.value,
-                    outcome=signal.outcome,
+                    outcome=outcome,  # Usar o outcome correto (No para SELL)
                     price=signal.market_price,
                     size=signal.size_usd / signal.market_price if signal.market_price > 0 else 0,
                     fee=signal.size_usd * 0.01,  # 1% paper fee
