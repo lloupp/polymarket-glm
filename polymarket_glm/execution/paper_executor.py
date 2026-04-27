@@ -6,6 +6,7 @@ Implements ExchangeClient protocol with:
 - Balance management
 - Fill simulation (always fills at requested price)
 - Insufficient balance rejection
+- Portfolio reconciliation (cash + positions = total equity)
 """
 from __future__ import annotations
 
@@ -24,19 +25,26 @@ from polymarket_glm.models import Side, Account, Position
 logger = logging.getLogger(__name__)
 
 
+class PortfolioMismatchError(Exception):
+    """Raised when portfolio reconciliation detects an inconsistency."""
+
+
 class PaperExecutor:
     """Paper trading executor — simulates fills, tracks positions and balance."""
 
     def __init__(
         self,
-        initial_balance: float = 10_000.0,
+        initial_balance: float = 1_000.0,
         fee_rate_bps: int = 100,  # 1% = 100 bps
     ):
+        self._initial_balance = initial_balance
         self._balance = initial_balance
         self._fee_rate_bps = fee_rate_bps
         self._positions: dict[str, dict[str, Position]] = defaultdict(dict)
         self._open_orders: dict[str, OrderRequest] = {}
         self._trade_history: list[FillResult] = []
+        self._total_fees_paid: float = 0.0
+        self._total_realized_pnl: float = 0.0
 
     @property
     def account(self) -> Account:
@@ -54,6 +62,14 @@ class PaperExecutor:
             positions=positions,
         )
 
+    @property
+    def total_fees_paid(self) -> float:
+        return self._total_fees_paid
+
+    @property
+    def total_realized_pnl(self) -> float:
+        return self._total_realized_pnl
+
     def get_position(self, market_id: str, outcome: str) -> Position | None:
         """Get a specific position."""
         return self._positions.get(market_id, {}).get(outcome)
@@ -61,6 +77,64 @@ class PaperExecutor:
     def _calc_fee(self, price: float, size: float) -> float:
         """Calculate fee: fee_rate_bps of the trade notional."""
         return price * size * self._fee_rate_bps / 10_000
+
+    # ── Portfolio Reconciliation ────────────────────────────────
+
+    def reconcile_portfolio(self) -> dict:
+        """Validate portfolio consistency: cash + positions = total equity.
+
+        Returns a dict with:
+            cash: current balance
+            positions_cost: sum of all position costs (size * avg_price)
+            total_equity: cash + positions_cost
+            expected_equity: initial_balance + realized_pnl - total_fees
+            discrepancy: total_equity - expected_equity
+            consistent: True if discrepancy is within tolerance (0.01)
+            trades_count: number of fills in history
+            fees_paid: total fees paid
+            realized_pnl: total realized P&L from closed positions
+
+        Raises PortfolioMismatchError if discrepancy exceeds tolerance.
+        """
+        positions_cost = 0.0
+        for market_positions in self._positions.values():
+            for pos in market_positions.values():
+                positions_cost += pos.size * pos.avg_price
+
+        cash = self._balance
+        total_equity = cash + positions_cost
+        expected_equity = (
+            self._initial_balance
+            + self._total_realized_pnl
+            - self._total_fees_paid
+        )
+        discrepancy = round(total_equity - expected_equity, 4)
+        consistent = abs(discrepancy) < 0.01  # 1 cent tolerance
+
+        result = {
+            "cash": round(cash, 4),
+            "positions_cost": round(positions_cost, 4),
+            "total_equity": round(total_equity, 4),
+            "expected_equity": round(expected_equity, 4),
+            "discrepancy": discrepancy,
+            "consistent": consistent,
+            "trades_count": len(self._trade_history),
+            "fees_paid": round(self._total_fees_paid, 4),
+            "realized_pnl": round(self._total_realized_pnl, 4),
+        }
+
+        if not consistent:
+            logger.error(
+                "⚠️ Portfolio mismatch! equity=$%.2f expected=$%.2f "
+                "discrepancy=$%.4f | cash=$%.2f positions=$%.2f "
+                "fees=$%.2f realized_pnl=$%.2f trades=%d",
+                total_equity, expected_equity, discrepancy,
+                cash, positions_cost,
+                self._total_fees_paid, self._total_realized_pnl,
+                len(self._trade_history),
+            )
+
+        return result
 
     # ── Sync interface (for testing and simplicity) ─────────────
 
@@ -74,7 +148,7 @@ class PaperExecutor:
         if request.side == Side.BUY:
             if total_cost > self._balance:
                 logger.warning("Paper: insufficient balance ($%.2f < $%.2f)",
-                             self._balance, total_cost)
+                               self._balance, total_cost)
                 return FillResult(
                     order_id=order_id,
                     market_id=request.market_id,
@@ -88,6 +162,7 @@ class PaperExecutor:
                 )
             # Deduct balance
             self._balance -= total_cost
+            self._total_fees_paid += fee
 
         # Update position
         market_positions = self._positions[request.market_id]
@@ -112,6 +187,9 @@ class PaperExecutor:
             elif request.side == Side.SELL:
                 new_size = existing.size - request.size
                 realized_pnl = (request.price - existing.avg_price) * request.size
+                self._total_realized_pnl += realized_pnl
+                self._total_fees_paid += fee
+
                 if new_size <= 0:
                     # Fully closed position — return proceeds
                     proceeds = request.price * request.size - fee
@@ -182,8 +260,8 @@ class PaperExecutor:
         )
         self._trade_history.append(fill)
         logger.info("Paper fill: %s %s %s@%.2f x%.0f fee=$%.4f",
-                   request.side.value, request.market_id, request.outcome,
-                   request.price, request.size, fee)
+                     request.side.value, request.market_id, request.outcome,
+                     request.price, request.size, fee)
         return fill
 
     def cancel_order_sync(self, order_id: str) -> CancelResult:
