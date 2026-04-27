@@ -294,9 +294,11 @@ class SimulationEngine:
         )
 
         # Startup alert
+        safe = self._settings.safe_mode_summary()
         await self._send_alert(
             "Simulation Started",
-            f"Mode: paper | Balance: ${self._settings.paper_balance_usd:,.2f} | Interval: {self._scan_interval:.0f}s",
+            f"Mode: paper | Balance: ${self._settings.paper_balance_usd:,.2f} | Interval: {self._scan_interval:.0f}s\n"
+            f"Safe mode: trading={safe['trading_enabled']} signals={safe['effective_signals_enabled']} orders={safe['effective_orders_enabled']}",
             "info",
         )
 
@@ -573,6 +575,11 @@ class SimulationEngine:
 
     async def _process_market(self, market) -> str | None:
         """Process a single market: fetch book → estimate → signal → risk → execute."""
+        # ── Safe mode gates ────────────────────────────────────
+        if not self._settings.effective_signals_enabled:
+            logger.debug("⏭ Signals disabled (safe mode) — skipping %s", market.question[:40])
+            return None
+
         # Fetch order book using the FULL CLOB token ID (not the short numeric market_id)
         token_id = market.tokens[0] if market.tokens else None
         if not token_id:
@@ -662,6 +669,17 @@ class SimulationEngine:
         if verdict != RiskVerdict.ALLOW:
             logger.info("⛔ Risk rejected: %s (%s)", verdict.value, reason)
             return "rejected"
+
+        # ── Orders gate (safe mode) ───────────────────────────
+        if not self._settings.effective_orders_enabled:
+            logger.info(
+                "📋 Orders disabled (safe mode) — signal logged but NOT executed: "
+                "%s %s edge=%.4f size=$%.2f",
+                signal.signal_type.value, signal.outcome,
+                signal.edge, signal.size_usd,
+            )
+            return "signal"
+
         # Execute (paper)
         # In Polymarket, SELL YES without position = BUY NO instead
         if signal.signal_type == SignalType.SELL:

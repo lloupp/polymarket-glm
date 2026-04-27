@@ -108,12 +108,44 @@ class Settings(BaseSettings):
     telegram_alert_chat_id: str = ""
     telegram_alert_token: str = ""
 
+    # ── Safe mode feature flags ──────────────────────────────
+    # TRADING_ENABLED is the master switch. If False, signals and
+    # orders are both disabled regardless of their individual flags.
+    # Individual flags allow fine-grained control:
+    #   signals_enabled=False → LLM won't generate signals (dry run)
+    #   orders_enabled=False  → signals generated but no execution
+    trading_enabled: bool = Field(default=True)
+    signals_enabled: bool = Field(default=True)
+    orders_enabled: bool = Field(default=True)
+
     # Flat env vars for CLOB keys (since pydantic-settings with nested models
     # can be tricky — these override clob.* values if set)
     clob_api_key: str = ""
     clob_api_secret: str = ""
     clob_api_passphrase: str = ""
     private_key: str = ""
+
+    # ── Computed properties ──────────────────────────────────
+
+    @property
+    def effective_signals_enabled(self) -> bool:
+        """Whether signals should actually be generated."""
+        return self.trading_enabled and self.signals_enabled
+
+    @property
+    def effective_orders_enabled(self) -> bool:
+        """Whether orders should actually be submitted."""
+        return self.trading_enabled and self.orders_enabled
+
+    def safe_mode_summary(self) -> dict:
+        """Return a dict of safe mode flags for logging/status."""
+        return {
+            "trading_enabled": self.trading_enabled,
+            "signals_enabled": self.signals_enabled,
+            "orders_enabled": self.orders_enabled,
+            "effective_signals_enabled": self.effective_signals_enabled,
+            "effective_orders_enabled": self.effective_orders_enabled,
+        }
 
     @model_validator(mode="after")
     def _merge_flat_clob(self) -> "Settings":
