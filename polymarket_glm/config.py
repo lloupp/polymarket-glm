@@ -26,6 +26,16 @@ class RiskConfig(BaseModel):
     drawdown_arm_period_sec: float = Field(default=1800.0, gt=0)
     drawdown_min_observations: int = Field(default=3, ge=1)
 
+    # ── New risk controls (Sprint 13) ────────────────────────
+    # Position size as % of portfolio (dynamic — adjusts with balance)
+    max_position_pct_of_portfolio: float = Field(default=0.10, gt=0, lt=1)
+    # Per-category exposure (e.g. "politics", "sports", "crypto")
+    max_category_exposure_usd: float = Field(default=300.0, gt=0)
+    # Spread/liquidity gate — reject if spread > this (in basis points)
+    max_spread_bps: int = Field(default=500, gt=0)
+    # Cooldown between trades on same market
+    trade_cooldown_sec: float = Field(default=300.0, ge=0)
+
 
 class ClobConfig(BaseModel):
     api_key: str = ""

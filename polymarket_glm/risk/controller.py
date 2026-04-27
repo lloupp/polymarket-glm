@@ -33,6 +33,9 @@ class RiskVerdict(str, enum.Enum):
     DENY_DAILY_LIMIT = "deny_daily_limit"
     DENY_PER_TRADE = "deny_per_trade"
     DENY_MARKET_LIMIT = "deny_market_limit"
+    DENY_CATEGORY_LIMIT = "deny_category_limit"
+    DENY_SPREAD = "deny_spread"
+    DENY_COOLDOWN = "deny_cooldown"
     KILL_SWITCH = "kill_switch"
     DENY_DRAWDOWN = "deny_drawdown"
 
@@ -59,6 +62,13 @@ class RiskController:
         self._kill_switch_file: Path = kill_switch_file or self.DEFAULT_KILL_SWITCH_FILE
         self._restore_kill_switch()
 
+        # ── New state (Sprint 13) ─────────────────────────────
+        # Category tracking: market_id → category, category → total exposure
+        self._market_categories: dict[str, str] = {}
+        self._category_exposure: dict[str, float] = defaultdict(float)
+        # Cooldown: market_id → last trade timestamp (monotonic)
+        self._last_trade_at: dict[str, float] = {}
+
     # ── Public API ──────────────────────────────────────────────
 
     @property
@@ -82,6 +92,8 @@ class RiskController:
         outcome: str,
         trade_usd: float,
         current_balance: float | None = None,
+        category: str | None = None,
+        spread_bps: int | None = None,
     ) -> tuple[RiskVerdict, str]:
         """Pre-trade risk check. Returns (verdict, reason).
 
@@ -93,6 +105,8 @@ class RiskController:
                 check uses the *projected* post-trade balance
                 (current_balance - trade_usd) to detect drawdown BEFORE
                 the trade executes, not after.
+            category: Market category (e.g. "politics", "sports").
+            spread_bps: Current bid-ask spread in basis points.
         """
         # 1. Kill switch check (with cooldown)
         if self._kill_switch_active:
@@ -138,14 +152,23 @@ class RiskController:
                         f"{self._config.drawdown_min_observations})"
                     )
 
-        # 3. Per-trade limit
+        # 3. Per-trade limit (absolute)
         if trade_usd > self._config.max_per_trade_usd:
             return RiskVerdict.DENY_PER_TRADE, (
                 f"Trade ${trade_usd:.2f} exceeds per-trade limit "
                 f"${self._config.max_per_trade_usd:.2f}"
             )
 
-        # 4. Total exposure limit
+        # 4. Position size as % of portfolio (dynamic limit)
+        balance_for_pct = current_balance if current_balance is not None else self._peak_balance
+        max_position_by_pct = balance_for_pct * self._config.max_position_pct_of_portfolio
+        if trade_usd > max_position_by_pct:
+            return RiskVerdict.DENY_PER_TRADE, (
+                f"Trade ${trade_usd:.2f} exceeds {self._config.max_position_pct_of_portfolio:.0%} "
+                f"of portfolio (${max_position_by_pct:.2f} limit)"
+            )
+
+        # 5. Total exposure limit
         projected_total = self.total_exposure + trade_usd
         if projected_total > self._config.max_total_exposure_usd:
             return RiskVerdict.DENY_EXPOSURE, (
@@ -153,7 +176,7 @@ class RiskController:
                 f"${self._config.max_total_exposure_usd:.2f}"
             )
 
-        # 5. Per-market exposure limit
+        # 6. Per-market exposure limit
         projected_market = self.market_exposure(market_id) + trade_usd
         if projected_market > self._config.max_per_market_exposure_usd:
             return RiskVerdict.DENY_MARKET_LIMIT, (
@@ -161,7 +184,36 @@ class RiskController:
                 f"${self._config.max_per_market_exposure_usd:.2f}"
             )
 
-        # 6. Daily loss limit
+        # 7. Per-category exposure limit
+        if category is not None:
+            cat_exposure = self._category_exposure.get(category, 0.0)
+            projected_cat = cat_exposure + trade_usd
+            if projected_cat > self._config.max_category_exposure_usd:
+                return RiskVerdict.DENY_CATEGORY_LIMIT, (
+                    f"Category '{category}' exposure ${projected_cat:.2f} would exceed limit "
+                    f"${self._config.max_category_exposure_usd:.2f}"
+                )
+
+        # 8. Spread/liquidity gate
+        if spread_bps is not None and spread_bps > self._config.max_spread_bps:
+            return RiskVerdict.DENY_SPREAD, (
+                f"Spread {spread_bps}bps exceeds max {self._config.max_spread_bps}bps "
+                f"— insufficient liquidity"
+            )
+
+        # 9. Cooldown between trades on same market
+        if self._config.trade_cooldown_sec > 0:
+            last_trade = self._last_trade_at.get(market_id)
+            if last_trade is not None:
+                elapsed = time.monotonic() - last_trade
+                if elapsed < self._config.trade_cooldown_sec:
+                    remaining = self._config.trade_cooldown_sec - elapsed
+                    return RiskVerdict.DENY_COOLDOWN, (
+                        f"Market {market_id} cooldown: {remaining:.0f}s remaining "
+                        f"(min {self._config.trade_cooldown_sec:.0f}s between trades)"
+                    )
+
+        # 10. Daily loss limit
         if self._daily_loss >= self._config.daily_loss_limit_usd:
             return RiskVerdict.DENY_DAILY_LIMIT, (
                 f"Daily loss ${self._daily_loss:.2f} reached limit "
@@ -170,11 +222,57 @@ class RiskController:
 
         return RiskVerdict.ALLOW, "OK"
 
+    # Convenience wrappers
+    def check_with_category(
+        self,
+        market_id: str,
+        outcome: str,
+        trade_usd: float,
+        category: str,
+        current_balance: float | None = None,
+        spread_bps: int | None = None,
+    ) -> tuple[RiskVerdict, str]:
+        """Check with category (convenience wrapper)."""
+        return self.check(market_id, outcome, trade_usd,
+                          current_balance=current_balance,
+                          category=category, spread_bps=spread_bps)
+
+    def check_with_spread(
+        self,
+        market_id: str,
+        outcome: str,
+        trade_usd: float,
+        spread_bps: int,
+        current_balance: float | None = None,
+        category: str | None = None,
+    ) -> tuple[RiskVerdict, str]:
+        """Check with spread (convenience wrapper)."""
+        return self.check(market_id, outcome, trade_usd,
+                          current_balance=current_balance,
+                          category=category, spread_bps=spread_bps)
+
     def record_fill(self, market_id: str, outcome: str, usd: float) -> None:
         """Record a filled trade for exposure tracking."""
         self._market_exposure[market_id] += usd
+        # Track category exposure if market has a category
+        cat = self._market_categories.get(market_id)
+        if cat is not None:
+            self._category_exposure[cat] += usd
         logger.debug("Exposure update: %s += $%.2f (total: $%.2f)",
                      market_id, usd, self.total_exposure)
+
+    def set_market_category(self, market_id: str, category: str) -> None:
+        """Assign a category to a market for per-category exposure tracking."""
+        # If market already had a category, migrate exposure
+        old_cat = self._market_categories.get(market_id)
+        if old_cat is not None and old_cat != category:
+            existing = self._market_exposure.get(market_id, 0.0)
+            self._category_exposure[old_cat] -= existing
+        self._market_categories[market_id] = category
+
+    def record_trade_time(self, market_id: str) -> None:
+        """Record the time of a trade for cooldown tracking."""
+        self._last_trade_at[market_id] = time.monotonic()
 
     def record_loss(self, amount: float) -> None:
         """Record a realized loss for daily loss tracking."""
@@ -321,4 +419,7 @@ class RiskController:
             "daily_loss": self._daily_loss,
             "peak_balance": self._peak_balance,
             "markets_tracked": len(self._market_exposure),
+            "category_exposure": dict(self._category_exposure),
+            "categories_tracked": len(self._category_exposure),
+            "markets_in_cooldown": len(self._last_trade_at),
         }

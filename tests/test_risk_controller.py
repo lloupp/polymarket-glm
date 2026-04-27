@@ -35,7 +35,7 @@ def test_deny_per_trade():
 
 
 def test_deny_total_exposure():
-    rc = RiskController(RiskConfig(max_total_exposure_usd=1000, max_per_trade_usd=500), kill_switch_file=_tmp_kill_switch_file())
+    rc = RiskController(RiskConfig(max_total_exposure_usd=1000, max_per_trade_usd=500, max_position_pct_of_portfolio=0.99), kill_switch_file=_tmp_kill_switch_file())
     # Accumulate exposure
     rc.record_fill(market_id="m1", outcome="Yes", usd=800)
     verdict, reason = rc.check(market_id="m2", outcome="Yes", trade_usd=300)
@@ -44,7 +44,7 @@ def test_deny_total_exposure():
 
 
 def test_deny_market_limit():
-    rc = RiskController(RiskConfig(max_per_market_exposure_usd=500, max_per_trade_usd=500, max_total_exposure_usd=5000), kill_switch_file=_tmp_kill_switch_file())
+    rc = RiskController(RiskConfig(max_per_market_exposure_usd=500, max_per_trade_usd=500, max_total_exposure_usd=5000, max_position_pct_of_portfolio=0.99), kill_switch_file=_tmp_kill_switch_file())
     rc.record_fill(market_id="m1", outcome="Yes", usd=400)
     verdict, reason = rc.check(market_id="m1", outcome="Yes", trade_usd=200)
     assert verdict == RiskVerdict.DENY_MARKET_LIMIT
