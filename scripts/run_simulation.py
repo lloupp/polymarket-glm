@@ -616,6 +616,17 @@ class SimulationEngine:
 
         if self._use_llm:
             estimate = await self._llm_router.estimate(mi, news_context=news_context)
+            # Apply confidence penalty if no context was available
+            if not news_context and self._context_builder.has_any_source:
+                penalty = self._context_builder.confidence_penalty
+                if penalty < 1.0:
+                    original_confidence = estimate.confidence
+                    estimate.confidence = original_confidence * penalty
+                    logger.info(
+                        "📉 No context — confidence penalty: %.2f → %.2f (%.0f%% reduction)",
+                        original_confidence, estimate.confidence,
+                        (1.0 - penalty) * 100,
+                    )
             estimated_prob = estimate.probability
             edge_source = estimate.source
             logger.info(
