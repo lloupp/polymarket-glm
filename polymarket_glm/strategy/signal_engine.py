@@ -36,6 +36,8 @@ class Signal(BaseModel):
     kelly_raw: float = 0.0
     kelly_sized: float = 0.0
     target_price: float = 0.0
+    ev: float = 0.0  # Expected value = |edge| * size_usd
+    confidence: str = "unknown"  # LLM confidence: high, medium, low, unknown
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -107,6 +109,7 @@ class SignalEngine:
         estimated_prob: float,
         balance_usd: float = 10_000.0,
         open_market_ids: set[str] | None = None,
+        confidence: str = "unknown",
     ) -> Signal | None:
         """Generate a signal from market data and estimated probability.
 
@@ -138,15 +141,17 @@ class SignalEngine:
         # Check minimum edge
         if abs(edge) < self._min_edge:
             logger.debug("Edge %.4f below threshold %.4f for %s",
-                        edge, self._min_edge, market.market_id)
+                         edge, self._min_edge, market.market_id)
             return None
 
-        # Determine direction
+        # Determine direction and outcome
         if edge > 0:
             signal_type = SignalType.BUY
+            outcome = "Yes"
             kelly = self.kelly_fraction(estimated_prob, market_price)
         else:
             signal_type = SignalType.SELL
+            outcome = "No"  # SELL YES = BUY NO
             # For sells, compute Kelly on the "No" side
             no_prob = 1 - estimated_prob
             no_price = 1 - market_price
@@ -159,11 +164,15 @@ class SignalEngine:
         if size_usd <= 0:
             return None
 
+        # Calculate EV = |edge| * size_usd
+        ev = abs(edge) * size_usd
+
         signal = Signal(
             market_id=market.market_id,
             condition_id=market.condition_id,
             question=market.question,
             signal_type=signal_type,
+            outcome=outcome,
             edge=edge,
             estimated_prob=estimated_prob,
             market_price=market_price,
@@ -171,7 +180,9 @@ class SignalEngine:
             kelly_raw=kelly_raw,
             kelly_sized=kelly,
             target_price=estimated_prob,
+            ev=ev,
+            confidence=confidence,
         )
-        logger.info("Signal: %s %s edge=%.4f size=$%.2f",
-                    signal_type.value, market.market_id, edge, size_usd)
+        logger.info("Signal: %s %s edge=%.4f ev=$%.2f confidence=%s size=$%.2f",
+                     signal_type.value, market.market_id, edge, ev, confidence, size_usd)
         return signal

@@ -122,11 +122,14 @@ class Settings(BaseSettings):
     # TRADING_ENABLED is the master switch. If False, signals and
     # orders are both disabled regardless of their individual flags.
     # Individual flags allow fine-grained control:
-    #   signals_enabled=False → LLM won't generate signals (dry run)
-    #   orders_enabled=False  → signals generated but no execution
+    # signals_enabled=False → LLM won't generate signals (dry run)
+    # orders_enabled=False → signals generated but no execution
     trading_enabled: bool = Field(default=True)
     signals_enabled: bool = Field(default=True)
     orders_enabled: bool = Field(default=True)
+
+    # ── Strategy parameters ──────────────────────────────────
+    min_edge: float = Field(default=0.05, gt=0, lt=0.5)
 
     # Flat env vars for CLOB keys (since pydantic-settings with nested models
     # can be tricky — these override clob.* values if set)
