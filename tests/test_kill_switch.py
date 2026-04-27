@@ -11,6 +11,7 @@ Tests ALL activation and deactivation paths:
 8) TelegramBot killswitch integration
 """
 import time
+from pathlib import Path
 
 import pytest
 from unittest.mock import MagicMock
@@ -39,7 +40,9 @@ def _make_rc(**overrides) -> RiskController:
         drawdown_min_observations=3,
     )
     defaults.update(overrides)
-    return RiskController(RiskConfig(**defaults))
+    import tempfile
+    tmp_file = Path(tempfile.mkdtemp()) / "kill_switch.json"
+    return RiskController(RiskConfig(**defaults), kill_switch_file=tmp_file)
 
 
 def _assert_kill_switch(rc: RiskController, market_id: str = "m1"):

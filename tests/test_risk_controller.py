@@ -1,8 +1,16 @@
 """Tests for risk controller."""
 import time
+import tempfile
+from pathlib import Path
+
 import pytest
 from polymarket_glm.risk.controller import RiskController, RiskVerdict
 from polymarket_glm.config import RiskConfig
+
+
+def _tmp_kill_switch_file() -> Path:
+    """Create a temp directory and return a kill_switch.json path inside it."""
+    return Path(tempfile.mkdtemp()) / "kill_switch.json"
 
 
 def test_verdict_values():
@@ -15,19 +23,19 @@ def test_verdict_values():
 
 
 def test_allow_within_limits():
-    rc = RiskController(RiskConfig(max_per_trade_usd=50, max_total_exposure_usd=500, max_per_market_exposure_usd=200))
+    rc = RiskController(RiskConfig(max_per_trade_usd=50, max_total_exposure_usd=500, max_per_market_exposure_usd=200), kill_switch_file=_tmp_kill_switch_file())
     verdict, reason = rc.check(market_id="m1", outcome="Yes", trade_usd=30)
     assert verdict == RiskVerdict.ALLOW
 
 
 def test_deny_per_trade():
-    rc = RiskController(RiskConfig(max_per_trade_usd=50))
+    rc = RiskController(RiskConfig(max_per_trade_usd=50), kill_switch_file=_tmp_kill_switch_file())
     verdict, reason = rc.check(market_id="m1", outcome="Yes", trade_usd=600)
     assert verdict == RiskVerdict.DENY_PER_TRADE
 
 
 def test_deny_total_exposure():
-    rc = RiskController(RiskConfig(max_total_exposure_usd=1000, max_per_trade_usd=500))
+    rc = RiskController(RiskConfig(max_total_exposure_usd=1000, max_per_trade_usd=500), kill_switch_file=_tmp_kill_switch_file())
     # Accumulate exposure
     rc.record_fill(market_id="m1", outcome="Yes", usd=800)
     verdict, reason = rc.check(market_id="m2", outcome="Yes", trade_usd=300)
@@ -36,21 +44,21 @@ def test_deny_total_exposure():
 
 
 def test_deny_market_limit():
-    rc = RiskController(RiskConfig(max_per_market_exposure_usd=500, max_per_trade_usd=500, max_total_exposure_usd=5000))
+    rc = RiskController(RiskConfig(max_per_market_exposure_usd=500, max_per_trade_usd=500, max_total_exposure_usd=5000), kill_switch_file=_tmp_kill_switch_file())
     rc.record_fill(market_id="m1", outcome="Yes", usd=400)
     verdict, reason = rc.check(market_id="m1", outcome="Yes", trade_usd=200)
     assert verdict == RiskVerdict.DENY_MARKET_LIMIT
 
 
 def test_deny_daily_loss():
-    rc = RiskController(RiskConfig(daily_loss_limit_usd=100, max_per_trade_usd=50))
+    rc = RiskController(RiskConfig(daily_loss_limit_usd=100, max_per_trade_usd=50), kill_switch_file=_tmp_kill_switch_file())
     rc.record_loss(120.0)
     verdict, reason = rc.check(market_id="m1", outcome="Yes", trade_usd=50)
     assert verdict == RiskVerdict.DENY_DAILY_LIMIT
 
 
 def test_kill_switch_manual():
-    rc = RiskController(RiskConfig())
+    rc = RiskController(RiskConfig(), kill_switch_file=_tmp_kill_switch_file())
     rc.activate_kill_switch("manual test")
     verdict, reason = rc.check(market_id="m1", outcome="Yes", trade_usd=10)
     assert verdict == RiskVerdict.KILL_SWITCH
@@ -61,7 +69,7 @@ def test_kill_switch_auto_drawdown():
         drawdown_circuit_breaker_pct=0.10,
         drawdown_arm_period_sec=0.01,  # minimal arm period for test
         drawdown_min_observations=3,
-    ))
+    ), kill_switch_file=_tmp_kill_switch_file())
     rc._peak_balance = 1000.0
     # Simulate 3 drawdown observations (each 25% below peak)
     for _ in range(3):
@@ -71,7 +79,7 @@ def test_kill_switch_auto_drawdown():
 
 
 def test_kill_switch_cooldown():
-    rc = RiskController(RiskConfig(kill_switch_cooldown_sec=0.01))
+    rc = RiskController(RiskConfig(kill_switch_cooldown_sec=0.01), kill_switch_file=_tmp_kill_switch_file())
     rc.activate_kill_switch("test")
     verdict, _ = rc.check(market_id="m1", outcome="Yes", trade_usd=10)
     assert verdict == RiskVerdict.KILL_SWITCH
@@ -81,7 +89,7 @@ def test_kill_switch_cooldown():
 
 
 def test_exposure_tracking():
-    rc = RiskController(RiskConfig())
+    rc = RiskController(RiskConfig(), kill_switch_file=_tmp_kill_switch_file())
     rc.record_fill(market_id="m1", outcome="Yes", usd=300)
     rc.record_fill(market_id="m1", outcome="Yes", usd=200)
     rc.record_fill(market_id="m2", outcome="No", usd=400)
@@ -91,7 +99,7 @@ def test_exposure_tracking():
 
 
 def test_reset_daily():
-    rc = RiskController(RiskConfig(daily_loss_limit_usd=100))
+    rc = RiskController(RiskConfig(daily_loss_limit_usd=100), kill_switch_file=_tmp_kill_switch_file())
     rc.record_loss(80.0)
     assert rc.daily_loss == 80.0
     rc.reset_daily()

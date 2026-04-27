@@ -65,7 +65,10 @@ class SimulationEngine:
             kelly_fraction=0.25,
             max_position_usd=settings.risk.max_per_trade_usd,
         )
-        self._risk = RiskController(config=settings.risk)
+        self._risk = RiskController(
+            config=settings.risk,
+            kill_switch_file=PROJECT_ROOT / "data" / "kill_switch.json",
+        )
         self._executor = PaperExecutor(initial_balance=settings.paper_balance_usd)
         self._portfolio = PortfolioTracker()
         self._settlement = SettlementTracker()

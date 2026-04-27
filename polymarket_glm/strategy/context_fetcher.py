@@ -7,11 +7,13 @@ Components:
 - NewsFetcher: NewsAPI.org integration (free tier: 100 req/day)
 - WebSearcher: Tavily API integration (free tier: 1000 req/month)
 - ContextBuilder: Aggregates news + search into a formatted context string
+  with TTL cache + rate-limit backoff
 """
 from __future__ import annotations
 
 import logging
 import re
+import time
 from urllib.parse import quote_plus
 from typing import Protocol
 
@@ -79,21 +81,28 @@ class NewsFetcher:
 
     Free tier: 100 requests/day, sufficient for ~1-2 markets per
     simulation iteration (we throttle via ContextBuilder).
+    Includes rate-limit backoff: after a 429, pauses for backoff_sec.
     """
 
     def __init__(self, config: NewsFetcherConfig):
         self.config = config
+        self._rate_limited_until: float = 0.0  # monotonic timestamp
 
     @property
     def is_enabled(self) -> bool:
-        return self.config.enabled
+        return self.config.enabled and time.monotonic() >= self._rate_limited_until
 
     async def fetch(self, question: str) -> list[NewsArticle]:
         """Fetch news articles relevant to a market question.
 
-        Returns empty list if disabled or on any error.
+        Returns empty list if disabled, rate-limited, or on any error.
         """
-        if not self.is_enabled:
+        if not self.config.enabled:
+            return []
+
+        if time.monotonic() < self._rate_limited_until:
+            logger.debug("NewsFetcher: rate-limited, backing off (%.0fs remaining)",
+                         self._rate_limited_until - time.monotonic())
             return []
 
         query = self._build_query(question)
@@ -112,6 +121,15 @@ class NewsFetcher:
                         "pageSize": self.config.max_articles,
                     },
                 )
+
+                if resp.status_code == 429:
+                    # Back off for 15 minutes on rate limit
+                    self._rate_limited_until = time.monotonic() + 900.0
+                    logger.warning(
+                        "NewsAPI 429 rate limit — backing off until %s",
+                        time.strftime("%H:%M:%S", time.localtime(time.time() + 900)),
+                    )
+                    return []
 
                 if resp.status_code != 200:
                     logger.warning(
@@ -208,21 +226,28 @@ class WebSearcher:
 
     Free tier: 1000 requests/month — more than enough for
     our simulation cadence (1-2 searches per iteration).
+    Includes rate-limit backoff: after a 432, pauses for backoff_sec.
     """
 
     def __init__(self, config: WebSearcherConfig):
         self.config = config
+        self._rate_limited_until: float = 0.0  # monotonic timestamp
 
     @property
     def is_enabled(self) -> bool:
-        return self.config.enabled
+        return self.config.enabled and time.monotonic() >= self._rate_limited_until
 
     async def search(self, question: str) -> list[WebSearchResult]:
         """Search the web for context relevant to a market question.
 
-        Returns empty list if disabled or on any error.
+        Returns empty list if disabled, rate-limited, or on any error.
         """
-        if not self.is_enabled:
+        if not self.config.enabled:
+            return []
+
+        if time.monotonic() < self._rate_limited_until:
+            logger.debug("WebSearcher: rate-limited, backing off (%.0fs remaining)",
+                         self._rate_limited_until - time.monotonic())
             return []
 
         try:
@@ -231,13 +256,24 @@ class WebSearcher:
                     f"{self.config.base_url}/search",
                     json={
                         "api_key": self.config.api_key,
-                        "query": question[:200],  # Tavily accepts full questions
+                        "query": question[:200], # Tavily accepts full questions
                         "max_results": self.config.max_results,
                         "search_depth": self.config.search_depth,
                         "include_answer": False,
                         "include_raw_content": False,
                     },
                 )
+
+                if resp.status_code == 432 or resp.status_code == 429:
+                    # Back off for 60 minutes on rate limit
+                    backoff = 3600.0
+                    self._rate_limited_until = time.monotonic() + backoff
+                    logger.warning(
+                        "Tavily %d rate limit — backing off until %s",
+                        resp.status_code,
+                        time.strftime("%H:%M:%S", time.localtime(time.time() + backoff)),
+                    )
+                    return []
 
                 if resp.status_code != 200:
                     logger.warning(
@@ -413,21 +449,26 @@ class ContextBuilder:
     Priority: NewsAPI → Tavily → RSS (Google News fallback).
     RSS is always available (no API key) and serves as fallback
     when paid APIs hit rate limits.
+
+    Includes TTL cache to avoid re-fetching the same question
+    within cache_ttl_sec seconds (default: 600s = 10 min).
     """
 
-    def __init__(self, config: ContextBuilderConfig):
+    def __init__(self, config: ContextBuilderConfig, cache_ttl_sec: float = 600.0):
         self.config = config
         self._news_fetcher = NewsFetcher(config.news_fetcher)
         self._web_searcher = WebSearcher(config.web_searcher)
         self._rss_fetcher = RSSFetcher()  # Always available, no config needed
+        self._cache_ttl = cache_ttl_sec
+        self._context_cache: dict[str, tuple[float, str]] = {}  # question -> (timestamp, context)
 
     @property
     def has_any_source(self) -> bool:
-        """Check if at least one context source is available."""
+        """Check if at least one context source is available (including RSS)."""
         return (
             self._news_fetcher.is_enabled
             or self._web_searcher.is_enabled
-            or self._rss_fetcher.is_available
+            or self._rss_fetcher.is_available  # RSS always works as fallback
         )
 
     async def fetch_context(self, question: str) -> str:
@@ -435,8 +476,20 @@ class ContextBuilder:
 
         Priority: NewsAPI → Tavily → RSS (Google News fallback).
         RSS is always available as fallback when APIs are rate-limited.
+        Includes TTL cache — same question within cache_ttl_sec returns cached result.
         Returns formatted context string, or empty string if nothing available.
         """
+        # Check TTL cache first
+        cache_key = question.lower().strip()
+        if cache_key in self._context_cache:
+            ts, cached_ctx = self._context_cache[cache_key]
+            age = time.monotonic() - ts
+            if age < self._cache_ttl:
+                logger.debug("ContextBuilder cache hit for '%s' (%.0fs old)", question[:40], age)
+                return cached_ctx
+            else:
+                del self._context_cache[cache_key]
+
         news_articles: list[NewsArticle] = []
         search_results: list[WebSearchResult] = []
 
@@ -454,9 +507,22 @@ class ContextBuilder:
                 logger.info("📡 RSS fallback: %d articles for '%s'", len(news_articles), question[:40])
 
         if not news_articles and not search_results:
+            # Cache empty result too (shorter TTL: 60s) to avoid hammering
+            self._context_cache[cache_key] = (time.monotonic(), "")
             return ""
 
-        return self.build_context(news_articles, search_results)
+        context = self.build_context(news_articles, search_results)
+        # Cache the result
+        self._context_cache[cache_key] = (time.monotonic(), context)
+        logger.debug("ContextBuilder cached context for '%s' (%d chars)", question[:40], len(context))
+
+        # Prune expired entries
+        now = time.monotonic()
+        expired = [k for k, (ts, _) in self._context_cache.items() if now - ts > self._cache_ttl * 2]
+        for k in expired:
+            del self._context_cache[k]
+
+        return context
 
     async def _safe_fetch_rss(self, question: str) -> list[NewsArticle]:
         """Fetch RSS with error handling."""

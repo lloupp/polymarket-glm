@@ -4,6 +4,8 @@ Tests the full signal→risk→execution pipeline in dry-run mode
 without requiring real API keys or network access.
 """
 import pytest
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from polymarket_glm.config import Settings, ExecutionMode, RiskConfig
@@ -73,7 +75,7 @@ class TestDryRunFullPipeline:
     async def test_signal_to_dry_run_execution(self):
         """Generate a signal, pass risk, execute in dry-run."""
         # Setup
-        risk = RiskController(RiskConfig(max_per_trade_usd=50.0))
+        risk = RiskController(RiskConfig(max_per_trade_usd=50.0), kill_switch_file=Path(tempfile.mkdtemp()) / "ks.json")
         executor = LiveExecutor(dry_run=True)
 
         # Create a market with an edge
@@ -128,7 +130,7 @@ class TestDryRunFullPipeline:
     @pytest.mark.asyncio
     async def test_risk_blocks_dry_run_execution(self):
         """Kill switch should block even in dry-run mode."""
-        risk = RiskController(RiskConfig(max_per_trade_usd=50.0))
+        risk = RiskController(RiskConfig(max_per_trade_usd=50.0), kill_switch_file=Path(tempfile.mkdtemp()) / "ks.json")
         risk.activate_kill_switch("test kill switch")
 
         verdict, reason = risk.check(
@@ -145,7 +147,7 @@ class TestDryRunFullPipeline:
         risk = RiskController(RiskConfig(
             daily_loss_limit_usd=30.0,
             max_per_trade_usd=50.0,
-        ))
+        ), kill_switch_file=Path(tempfile.mkdtemp()) / "ks.json")
         risk.record_loss(30.0)  # hit the limit
 
         verdict, reason = risk.check(

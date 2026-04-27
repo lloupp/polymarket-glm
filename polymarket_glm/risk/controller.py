@@ -35,7 +35,9 @@ class RiskVerdict(str, enum.Enum):
 class RiskController:
     """Pre-trade risk gate with circuit-breaker and kill switch."""
 
-    def __init__(self, config: RiskConfig | None = None):
+    DEFAULT_KILL_SWITCH_FILE = Path("data/kill_switch.json")
+
+    def __init__(self, config: RiskConfig | None = None, kill_switch_file: Path | None = None):
         self._config = config or RiskConfig()
         self._market_exposure: dict[str, float] = defaultdict(float)
         self._daily_loss: float = 0.0
@@ -44,6 +46,8 @@ class RiskController:
         self._kill_switch_at: float = 0.0  # monotonic timestamp
         self._peak_balance: float = 10_000.0
         self._drawdown_observations: list[tuple[float, float]] = []  # (timestamp, balance)
+        self.KILL_SWITCH_FILE: Path = kill_switch_file or self.DEFAULT_KILL_SWITCH_FILE
+        self._restore_kill_switch()
 
     # ── Public API ──────────────────────────────────────────────
 
