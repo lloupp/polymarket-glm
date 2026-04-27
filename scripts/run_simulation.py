@@ -68,6 +68,7 @@ class SimulationEngine:
         self._risk = RiskController(
             config=settings.risk,
             kill_switch_file=PROJECT_ROOT / "data" / "kill_switch.json",
+            initial_balance=settings.paper_balance_usd,
         )
         self._executor = PaperExecutor(initial_balance=settings.paper_balance_usd)
         self._portfolio = PortfolioTracker()
@@ -651,11 +652,12 @@ class SimulationEngine:
             signal.edge,
             signal.size_usd,
         )
-        # Risk check
+        # Risk check (PRE-trade drawdown using projected balance)
         verdict, reason = self._risk.check(
             market_id=signal.market_id,
             outcome=signal.outcome,
             trade_usd=signal.size_usd,
+            current_balance=self._executor.account.balance_usd,
         )
         if verdict != RiskVerdict.ALLOW:
             logger.info("⛔ Risk rejected: %s (%s)", verdict.value, reason)

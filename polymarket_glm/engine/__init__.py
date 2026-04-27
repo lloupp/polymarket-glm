@@ -44,7 +44,10 @@ class Engine:
 
     def _init_components(self) -> None:
         # Risk
-        self._risk = RiskController(self._settings.risk)
+        self._risk = RiskController(
+ self._settings.risk,
+ initial_balance=self._settings.paper_balance_usd,
+ )
 
         # Alerts
         self._alerts = AlertManager(

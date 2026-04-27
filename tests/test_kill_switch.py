@@ -175,10 +175,10 @@ class TestDrawdownCircuitBreaker:
             drawdown_arm_period_sec=10.0,
             drawdown_min_observations=3,
         )
-        # Peak starts at 10_000 (default)
-        # Balance drops to 8_500 → 15% drawdown, exceeds 10% threshold
+        # Peak starts at initial_balance (default 1_000)
+        # Balance drops to 850 → 15% drawdown from 1000, exceeds 10% threshold
         for _ in range(3):
-            rc.update_balance(8500.0)
+            rc.update_balance(850.0)
         _assert_kill_switch(rc)
 
     def test_drawdown_arm_period_prunes_stale_observations(self):
