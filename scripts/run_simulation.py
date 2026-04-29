@@ -286,6 +286,13 @@ class SimulationEngine:
     async def run(self) -> None:
         """Run the simulation loop."""
         self._running = True
+
+        # PAPER MODE ACTIVE banner
+        if self._settings.execution_mode == ExecutionMode.PAPER:
+            logger.info("=" * 60)
+            logger.info("📋 PAPER MODE ACTIVE — live_orders=disabled")
+            logger.info("=" * 60)
+
         logger.info(
             "🚀 Simulation started (mode=%s, interval=%.0fs, balance=$%.2f)",
             self._settings.execution_mode.value,
@@ -535,6 +542,8 @@ class SimulationEngine:
                             signal_type="close",
                             reason=reason,
                             market_price=current_price,
+                            llm_source="position_manager",
+                            llm_state="normal",
                             ev=realized_pnl,
                             risk_verdict="allow",
                             risk_reason="position_management",
@@ -592,7 +601,20 @@ class SimulationEngine:
             logger.info("📋 Daily report sent")
 
     def _log_audit(self, result: DecisionResult) -> None:
-        """Persist a DecisionResult to the audit_log table."""
+        """Persist a DecisionResult to the audit_log table + structured log."""
+        # Structured decision log
+        logger.info(
+            "🔍 Decision: %s | %s | edge=%.4f | reason=%s | llm=%s(%s) | ctx=%s",
+            result.decision.value,
+            result.question[:40] if result.question else "?",
+            result.edge,
+            result.reason[:60] if result.reason else "",
+            result.llm_source or "?",
+            result.llm_state or "?",
+            "✓" if result.context_available else "✗",
+        )
+
+        # Persist to DB
         try:
             db = self._ensure_db()
             db.save_audit(
@@ -605,6 +627,8 @@ class SimulationEngine:
                 estimated_prob=result.estimated_prob or 0,
                 market_price=result.market_price or 0,
                 confidence=str(result.confidence) if result.confidence is not None else None,
+                llm_source=result.llm_source or "",
+                llm_state=result.llm_state or "",
                 ev=result.ev,
                 risk_verdict=result.risk_verdict or "",
                 risk_reason=result.risk_reason or "",
@@ -641,6 +665,8 @@ class SimulationEngine:
                 market_id=market_id,
                 question=question,
                 reason="safe_mode_signals_disabled",
+                llm_source="n/a",
+                llm_state="n/a",
                 portfolio_cash=cash, portfolio_positions_value=pos_val,
                 portfolio_total=total,
             )
@@ -656,6 +682,8 @@ class SimulationEngine:
                 market_id=market_id,
                 question=question,
                 reason="no_token_id",
+                llm_source="n/a",
+                llm_state="n/a",
                 portfolio_cash=cash, portfolio_positions_value=pos_val,
                 portfolio_total=total,
             )
@@ -669,6 +697,8 @@ class SimulationEngine:
                 market_id=market_id,
                 question=question,
                 reason="no_order_book",
+                llm_source="n/a",
+                llm_state="n/a",
                 portfolio_cash=cash, portfolio_positions_value=pos_val,
                 portfolio_total=total,
             )
@@ -755,6 +785,16 @@ class SimulationEngine:
             noise = random.gauss(0, 0.05)
             estimated_prob = max(0.01, min(0.99, base_prob + noise))
 
+        # Compute llm_state for audit trail
+        if not self._use_llm:
+            llm_state = "heuristic_only"
+        elif llm_degraded:
+            llm_state = "degraded"
+        elif "fallback" in edge_source or "low_confidence" in edge_source:
+            llm_state = "degraded"
+        else:
+            llm_state = "normal"
+
         # Generate signal
         signal = self._signal_engine.generate_signal(
             market=market,
@@ -771,9 +811,11 @@ class SimulationEngine:
                 question=question,
                 reason="no_edge",
                 signal_type=edge_source,
-                estimated_prob=estimated_prob,
                 edge=0,
+                estimated_prob=estimated_prob,
                 confidence=confidence,
+                llm_source=edge_source,
+                llm_state=llm_state,
                 portfolio_cash=cash, portfolio_positions_value=pos_val,
                 portfolio_total=total,
                 context_available=bool(news_context),
@@ -808,6 +850,8 @@ class SimulationEngine:
                 estimated_prob=signal.estimated_prob,
                 market_price=signal.market_price,
                 confidence=confidence,
+                llm_source=edge_source,
+                llm_state=llm_state,
                 risk_verdict=verdict.value,
                 risk_reason=reason,
                 portfolio_cash=cash, portfolio_positions_value=pos_val,
@@ -837,6 +881,8 @@ class SimulationEngine:
                 estimated_prob=signal.estimated_prob,
                 market_price=signal.market_price,
                 confidence=confidence,
+                llm_source=edge_source,
+                llm_state=llm_state,
                 risk_verdict="allow",
                 risk_reason="OK",
                 portfolio_cash=cash, portfolio_positions_value=pos_val,
@@ -917,6 +963,8 @@ class SimulationEngine:
                 estimated_prob=signal.estimated_prob,
                 market_price=signal.market_price,
                 confidence=confidence,
+                llm_source=edge_source,
+                llm_state=llm_state,
                 ev=signal.edge * signal.size_usd,
                 risk_verdict="allow",
                 risk_reason="OK",
@@ -956,6 +1004,8 @@ class SimulationEngine:
                 estimated_prob=signal.estimated_prob,
                 market_price=signal.market_price,
                 confidence=confidence,
+                llm_source=edge_source,
+                llm_state=llm_state,
                 risk_verdict="allow",
                 risk_reason="OK",
                 portfolio_cash=cash, portfolio_positions_value=pos_val,

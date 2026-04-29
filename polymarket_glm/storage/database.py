@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
     estimated_prob REAL DEFAULT 0,
     market_price REAL DEFAULT 0,
     confidence TEXT DEFAULT NULL,
+    llm_source TEXT DEFAULT '',
+    llm_state TEXT DEFAULT '',
     ev REAL DEFAULT NULL,
     risk_verdict TEXT DEFAULT '',
     risk_reason TEXT DEFAULT '',
@@ -192,6 +194,18 @@ class Database:
         except Exception as exc:
             logger.warning("Audit log migration failed (non-fatal): %s", exc)
 
+        # Add llm_source and llm_state columns if missing (for existing DBs)
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(audit_log)").fetchall()]
+            if "llm_source" not in cols:
+                conn.execute("ALTER TABLE audit_log ADD COLUMN llm_source TEXT DEFAULT ''")
+                logger.info("Migration: added llm_source to audit_log")
+            if "llm_state" not in cols:
+                conn.execute("ALTER TABLE audit_log ADD COLUMN llm_state TEXT DEFAULT ''")
+                logger.info("Migration: added llm_state to audit_log")
+        except Exception as exc:
+            logger.warning("audit_log column migration failed (non-fatal): %s", exc)
+
     # ── Markets ─────────────────────────────────────────────────
 
     def save_market(self, *, condition_id: str, market_id: str, question: str,
@@ -279,17 +293,18 @@ class Database:
     # ── Audit Log ───────────────────────────────────────────────
 
     def save_audit(self, *, market_id: str, question: str = "",
-                   decision: str, reason: str = "",
-                   signal_type: str = "", edge: float = 0,
-                   estimated_prob: float = 0, market_price: float = 0,
-                   confidence: str | None = None,
-                   ev: float | None = None,
-                   risk_verdict: str = "", risk_reason: str = "",
-                   portfolio_cash: float = 0,
-                   portfolio_positions_value: float = 0,
-                   portfolio_total: float = 0,
-                   context_available: bool = False,
-                   **kwargs: Any) -> None:
+                    decision: str, reason: str = "",
+                    signal_type: str = "", edge: float = 0,
+                    estimated_prob: float = 0, market_price: float = 0,
+                    confidence: str | None = None,
+                    llm_source: str = "", llm_state: str = "",
+                    ev: float | None = None,
+                    risk_verdict: str = "", risk_reason: str = "",
+                    portfolio_cash: float = 0,
+                    portfolio_positions_value: float = 0,
+                    portfolio_total: float = 0,
+                    context_available: bool = False,
+                    **kwargs: Any) -> None:
         """Save an audit log entry for a signal decision.
 
         Records the full decision context: signal data, risk verdict,
@@ -299,16 +314,18 @@ class Database:
         conn.execute("""
             INSERT INTO audit_log
             (market_id, question, decision, reason, signal_type,
-             edge, estimated_prob, market_price, confidence, ev,
+             edge, estimated_prob, market_price, confidence,
+             llm_source, llm_state, ev,
              risk_verdict, risk_reason,
              portfolio_cash, portfolio_positions_value, portfolio_total,
              context_available)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (market_id, question, decision, reason, signal_type,
-              edge, estimated_prob, market_price, confidence, ev,
-              risk_verdict, risk_reason,
-              portfolio_cash, portfolio_positions_value, portfolio_total,
-              int(context_available)))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (market_id, question, decision, reason, signal_type,
+                  edge, estimated_prob, market_price, confidence,
+                  llm_source, llm_state, ev,
+                  risk_verdict, risk_reason,
+                  portfolio_cash, portfolio_positions_value, portfolio_total,
+                  int(context_available)))
         conn.commit()
 
     def get_audit(self, market_id: str | None = None, *,
