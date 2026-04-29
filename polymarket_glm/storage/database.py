@@ -38,16 +38,40 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 
 CREATE TABLE IF NOT EXISTS signals (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    market_id TEXT NOT NULL,
-    signal_type TEXT NOT NULL,
-    edge REAL,
-    estimated_prob REAL,
-    market_price REAL,
-    size_usd REAL,
-    kelly_raw REAL DEFAULT 0,
-    kelly_sized REAL DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now'))
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ market_id TEXT NOT NULL,
+ signal_type TEXT NOT NULL,
+ edge REAL,
+ estimated_prob REAL,
+ market_price REAL,
+ size_usd REAL,
+ kelly_raw REAL DEFAULT 0,
+ kelly_sized REAL DEFAULT 0,
+ outcome TEXT DEFAULT NULL,
+ confidence TEXT DEFAULT NULL,
+ ev REAL DEFAULT NULL,
+ created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ market_id TEXT NOT NULL,
+ question TEXT DEFAULT '',
+ decision TEXT NOT NULL,
+ reason TEXT DEFAULT '',
+ signal_type TEXT DEFAULT '',
+ edge REAL DEFAULT 0,
+ estimated_prob REAL DEFAULT 0,
+ market_price REAL DEFAULT 0,
+ confidence TEXT DEFAULT NULL,
+ ev REAL DEFAULT NULL,
+ risk_verdict TEXT DEFAULT '',
+ risk_reason TEXT DEFAULT '',
+ portfolio_cash REAL DEFAULT 0,
+ portfolio_positions_value REAL DEFAULT 0,
+ portfolio_total REAL DEFAULT 0,
+ context_available INTEGER DEFAULT 0,
+ created_at TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS prices (
@@ -62,6 +86,8 @@ CREATE TABLE IF NOT EXISTS prices (
 CREATE INDEX IF NOT EXISTS idx_trades_market ON trades(market_id);
 CREATE INDEX IF NOT EXISTS idx_signals_market ON signals(market_id);
 CREATE INDEX IF NOT EXISTS idx_prices_market ON prices(market_id);
+CREATE INDEX IF NOT EXISTS idx_audit_market ON audit_log(market_id);
+CREATE INDEX IF NOT EXISTS idx_audit_decision ON audit_log(decision);
 """
 
 
@@ -142,17 +168,22 @@ class Database:
 
     # ── Signals ─────────────────────────────────────────────────
 
-    def save_signal(self, *, market_id: str, signal_type: str, edge: float,
-                    estimated_prob: float, market_price: float, size_usd: float,
-                    kelly_raw: float = 0, kelly_sized: float = 0,
-                    **kwargs: Any) -> None:
-        conn = self._ensure_conn()
-        conn.execute("""
-            INSERT INTO signals
-            (market_id, signal_type, edge, estimated_prob, market_price, size_usd, kelly_raw, kelly_sized)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (market_id, signal_type, edge, estimated_prob, market_price, size_usd, kelly_raw, kelly_sized))
-        conn.commit()
+ def save_signal(self, *, market_id: str, signal_type: str, edge: float,
+ estimated_prob: float, market_price: float, size_usd: float,
+ kelly_raw: float = 0, kelly_sized: float = 0,
+ outcome: str | None = None,
+ confidence: str | None = None,
+ ev: float | None = None,
+ **kwargs: Any) -> None:
+ conn = self._ensure_conn()
+ conn.execute("""
+ INSERT INTO signals
+ (market_id, signal_type, edge, estimated_prob, market_price,
+ size_usd, kelly_raw, kelly_sized, outcome, confidence, ev)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ """, (market_id, signal_type, edge, estimated_prob, market_price,
+ size_usd, kelly_raw, kelly_sized, outcome, confidence, ev))
+ conn.commit()
 
     def get_signals(self, market_id: str | None = None, *,
                     limit: int = 100) -> list[dict]:

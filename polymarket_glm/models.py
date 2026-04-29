@@ -130,8 +130,42 @@ class Position(BaseModel):
     closed_at_iteration: int | None = None
 
 
+class DecisionType(str, enum.Enum):
+ """All possible paper-trading decision states."""
+ BUY_YES = "BUY_YES"
+ BUY_NO = "BUY_NO"
+ HOLD = "HOLD"
+ REJECT = "REJECT"
+ CLOSE_POSITION = "CLOSE_POSITION"
+
+
+class DecisionResult(BaseModel):
+ """Structured result from every market evaluation — full audit trail."""
+ decision: DecisionType
+ market_id: str = ""
+ question: str = ""
+ outcome: str = ""  # "Yes" or "No"
+ edge: float = 0.0
+ estimated_prob: float = 0.0
+ market_price: float = 0.0
+ confidence: float = 0.0
+ ev: float = 0.0
+ size_usd: float = 0.0
+ reason: str = ""  # Human-readable reason
+ risk_verdict: str = ""  # RiskVerdict value if rejected
+ risk_reason: str = ""  # RiskVerdict reason detail
+ llm_source: str = ""  # "groq", "gemini", "fallback", "heuristic"
+ llm_state: str = "normal"  # "normal", "degraded", "heuristic_only"
+ context_available: bool = False
+ portfolio_cash: float = 0.0
+ portfolio_positions_value: float = 0.0
+ portfolio_total: float = 0.0
+ total_exposure: float = 0.0
+ created_at: str = ""  # ISO timestamp
+
+
 class Account(BaseModel):
-    balance_usd: float = 10_000.0
-    total_exposure_usd: float = 0.0
-    daily_pnl_usd: float = 0.0
-    positions: list[Position] = []
+ balance_usd: float = 10_000.0
+ total_exposure_usd: float = 0.0
+ daily_pnl_usd: float = 0.0
+ positions: list[Position] = []
