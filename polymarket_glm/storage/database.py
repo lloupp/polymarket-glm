@@ -1,4 +1,4 @@
-"""Storage layer — SQLite database for trades, signals, prices, and markets."""
+"""Storage layer — SQLite database for trades, signals, prices, markets, and audit log."""
 from __future__ import annotations
 
 import logging
@@ -38,40 +38,40 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 
 CREATE TABLE IF NOT EXISTS signals (
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- market_id TEXT NOT NULL,
- signal_type TEXT NOT NULL,
- edge REAL,
- estimated_prob REAL,
- market_price REAL,
- size_usd REAL,
- kelly_raw REAL DEFAULT 0,
- kelly_sized REAL DEFAULT 0,
- outcome TEXT DEFAULT NULL,
- confidence TEXT DEFAULT NULL,
- ev REAL DEFAULT NULL,
- created_at TEXT DEFAULT (datetime('now'))
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id TEXT NOT NULL,
+    signal_type TEXT NOT NULL,
+    edge REAL,
+    estimated_prob REAL,
+    market_price REAL,
+    size_usd REAL,
+    kelly_raw REAL DEFAULT 0,
+    kelly_sized REAL DEFAULT 0,
+    outcome TEXT DEFAULT NULL,
+    confidence TEXT DEFAULT NULL,
+    ev REAL DEFAULT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- market_id TEXT NOT NULL,
- question TEXT DEFAULT '',
- decision TEXT NOT NULL,
- reason TEXT DEFAULT '',
- signal_type TEXT DEFAULT '',
- edge REAL DEFAULT 0,
- estimated_prob REAL DEFAULT 0,
- market_price REAL DEFAULT 0,
- confidence TEXT DEFAULT NULL,
- ev REAL DEFAULT NULL,
- risk_verdict TEXT DEFAULT '',
- risk_reason TEXT DEFAULT '',
- portfolio_cash REAL DEFAULT 0,
- portfolio_positions_value REAL DEFAULT 0,
- portfolio_total REAL DEFAULT 0,
- context_available INTEGER DEFAULT 0,
- created_at TEXT DEFAULT (datetime('now'))
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id TEXT NOT NULL,
+    question TEXT DEFAULT '',
+    decision TEXT NOT NULL,
+    reason TEXT DEFAULT '',
+    signal_type TEXT DEFAULT '',
+    edge REAL DEFAULT 0,
+    estimated_prob REAL DEFAULT 0,
+    market_price REAL DEFAULT 0,
+    confidence TEXT DEFAULT NULL,
+    ev REAL DEFAULT NULL,
+    risk_verdict TEXT DEFAULT '',
+    risk_reason TEXT DEFAULT '',
+    portfolio_cash REAL DEFAULT 0,
+    portfolio_positions_value REAL DEFAULT 0,
+    portfolio_total REAL DEFAULT 0,
+    context_available INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS prices (
@@ -90,6 +90,13 @@ CREATE INDEX IF NOT EXISTS idx_audit_market ON audit_log(market_id);
 CREATE INDEX IF NOT EXISTS idx_audit_decision ON audit_log(decision);
 """
 
+_MIGRATIONS = [
+    # Migration 1: Add outcome, confidence, ev columns to signals table
+    """ALTER TABLE signals ADD COLUMN outcome TEXT DEFAULT NULL""",
+    """ALTER TABLE signals ADD COLUMN confidence TEXT DEFAULT NULL""",
+    """ALTER TABLE signals ADD COLUMN ev REAL DEFAULT NULL""",
+]
+
 
 class Database:
     """SQLite storage for polymarket-glm data."""
@@ -103,6 +110,7 @@ class Database:
         self._conn = sqlite3.connect(self._path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._run_migrations()
         self._conn.commit()
         logger.info("Database initialized: %s", self._path)
 
@@ -115,6 +123,74 @@ class Database:
         if self._conn is None:
             self.initialize()
         return self._conn
+
+    def _run_migrations(self) -> None:
+        """Run schema migrations for existing databases.
+
+        Uses PRAGMA table_info to check if columns exist before
+        attempting ALTER TABLE — safe to run on fresh DBs.
+        """
+        conn = self._conn
+        if conn is None:
+            return
+
+        # Check if signals table is missing the new columns
+        try:
+            cursor = conn.execute("PRAGMA table_info(signals)")
+            columns = {row[1] for row in cursor.fetchall()}
+
+            if "outcome" not in columns:
+                conn.execute("ALTER TABLE signals ADD COLUMN outcome TEXT DEFAULT NULL")
+                logger.info("Migration: added 'outcome' column to signals")
+
+            if "confidence" not in columns:
+                conn.execute("ALTER TABLE signals ADD COLUMN confidence TEXT DEFAULT NULL")
+                logger.info("Migration: added 'confidence' column to signals")
+
+            if "ev" not in columns:
+                conn.execute("ALTER TABLE signals ADD COLUMN ev REAL DEFAULT NULL")
+                logger.info("Migration: added 'ev' column to signals")
+
+        except Exception as exc:
+            logger.warning("Migration check failed (non-fatal): %s", exc)
+
+        # Ensure audit_log table exists (for DBs created before Sprint 13)
+        try:
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='audit_log'"
+            )
+            if not cursor.fetchone():
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS audit_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        market_id TEXT NOT NULL,
+                        question TEXT DEFAULT '',
+                        decision TEXT NOT NULL,
+                        reason TEXT DEFAULT '',
+                        signal_type TEXT DEFAULT '',
+                        edge REAL DEFAULT 0,
+                        estimated_prob REAL DEFAULT 0,
+                        market_price REAL DEFAULT 0,
+                        confidence TEXT DEFAULT NULL,
+                        ev REAL DEFAULT NULL,
+                        risk_verdict TEXT DEFAULT '',
+                        risk_reason TEXT DEFAULT '',
+                        portfolio_cash REAL DEFAULT 0,
+                        portfolio_positions_value REAL DEFAULT 0,
+                        portfolio_total REAL DEFAULT 0,
+                        context_available INTEGER DEFAULT 0,
+                        created_at TEXT DEFAULT (datetime('now'))
+                    )
+                """)
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_audit_market ON audit_log(market_id)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_audit_decision ON audit_log(decision)"
+                )
+                logger.info("Migration: created audit_log table")
+        except Exception as exc:
+            logger.warning("Audit log migration failed (non-fatal): %s", exc)
 
     # ── Markets ─────────────────────────────────────────────────
 
@@ -168,22 +244,22 @@ class Database:
 
     # ── Signals ─────────────────────────────────────────────────
 
- def save_signal(self, *, market_id: str, signal_type: str, edge: float,
- estimated_prob: float, market_price: float, size_usd: float,
- kelly_raw: float = 0, kelly_sized: float = 0,
- outcome: str | None = None,
- confidence: str | None = None,
- ev: float | None = None,
- **kwargs: Any) -> None:
- conn = self._ensure_conn()
- conn.execute("""
- INSERT INTO signals
- (market_id, signal_type, edge, estimated_prob, market_price,
- size_usd, kelly_raw, kelly_sized, outcome, confidence, ev)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
- """, (market_id, signal_type, edge, estimated_prob, market_price,
- size_usd, kelly_raw, kelly_sized, outcome, confidence, ev))
- conn.commit()
+    def save_signal(self, *, market_id: str, signal_type: str, edge: float,
+                    estimated_prob: float, market_price: float, size_usd: float,
+                    kelly_raw: float = 0, kelly_sized: float = 0,
+                    outcome: str | None = None,
+                    confidence: str | None = None,
+                    ev: float | None = None,
+                    **kwargs: Any) -> None:
+        conn = self._ensure_conn()
+        conn.execute("""
+            INSERT INTO signals
+            (market_id, signal_type, edge, estimated_prob, market_price,
+             size_usd, kelly_raw, kelly_sized, outcome, confidence, ev)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (market_id, signal_type, edge, estimated_prob, market_price,
+              size_usd, kelly_raw, kelly_sized, outcome, confidence, ev))
+        conn.commit()
 
     def get_signals(self, market_id: str | None = None, *,
                     limit: int = 100) -> list[dict]:
@@ -196,6 +272,57 @@ class Database:
         else:
             rows = conn.execute(
                 "SELECT * FROM signals ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Audit Log ───────────────────────────────────────────────
+
+    def save_audit(self, *, market_id: str, question: str = "",
+                   decision: str, reason: str = "",
+                   signal_type: str = "", edge: float = 0,
+                   estimated_prob: float = 0, market_price: float = 0,
+                   confidence: str | None = None,
+                   ev: float | None = None,
+                   risk_verdict: str = "", risk_reason: str = "",
+                   portfolio_cash: float = 0,
+                   portfolio_positions_value: float = 0,
+                   portfolio_total: float = 0,
+                   context_available: bool = False,
+                   **kwargs: Any) -> None:
+        """Save an audit log entry for a signal decision.
+
+        Records the full decision context: signal data, risk verdict,
+        and portfolio snapshot at decision time.
+        """
+        conn = self._ensure_conn()
+        conn.execute("""
+            INSERT INTO audit_log
+            (market_id, question, decision, reason, signal_type,
+             edge, estimated_prob, market_price, confidence, ev,
+             risk_verdict, risk_reason,
+             portfolio_cash, portfolio_positions_value, portfolio_total,
+             context_available)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (market_id, question, decision, reason, signal_type,
+              edge, estimated_prob, market_price, confidence, ev,
+              risk_verdict, risk_reason,
+              portfolio_cash, portfolio_positions_value, portfolio_total,
+              int(context_available)))
+        conn.commit()
+
+    def get_audit(self, market_id: str | None = None, *,
+                  limit: int = 100) -> list[dict]:
+        """Retrieve audit log entries, optionally filtered by market_id."""
+        conn = self._ensure_conn()
+        if market_id:
+            rows = conn.execute(
+                "SELECT * FROM audit_log WHERE market_id = ? ORDER BY created_at DESC LIMIT ?",
+                (market_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
