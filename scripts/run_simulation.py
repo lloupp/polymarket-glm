@@ -105,19 +105,19 @@ class SimulationEngine:
                     model=llm_cfg.cerebras_model, rpm=llm_cfg.cerebras_rpm,
                     api_key=llm_cfg.cerebras_api_key, priority=4,
                 ))
-        if llm_cfg.mistral_api_key:
-            providers.append(LLMProviderConfig(
-                name="mistral", base_url=llm_cfg.mistral_base_url,
-                model=llm_cfg.mistral_model, rpm=llm_cfg.mistral_rpm,
-                api_key=llm_cfg.mistral_api_key, priority=5,
-            ))
-        if llm_cfg.minimax_api_key:
-            providers.append(LLMProviderConfig(
-                name="minimax", base_url=llm_cfg.minimax_base_url,
-                model=llm_cfg.minimax_model, rpm=llm_cfg.minimax_rpm,
-                api_key=llm_cfg.minimax_api_key, priority=0,
-                enable_web_search=llm_cfg.minimax_enable_web_search,
-            ))
+            if llm_cfg.mistral_api_key:
+                providers.append(LLMProviderConfig(
+                    name="mistral", base_url=llm_cfg.mistral_base_url,
+                    model=llm_cfg.mistral_model, rpm=llm_cfg.mistral_rpm,
+                    api_key=llm_cfg.mistral_api_key, priority=5,
+                ))
+            if llm_cfg.minimax_api_key:
+                providers.append(LLMProviderConfig(
+                    name="minimax", base_url=llm_cfg.minimax_base_url,
+                    model=llm_cfg.minimax_model, rpm=llm_cfg.minimax_rpm,
+                    api_key=llm_cfg.minimax_api_key, priority=0,
+                    enable_web_search=llm_cfg.minimax_enable_web_search,
+                ))
 
             self._llm_router = LLMRouter(RouterConfig(
                 providers=providers,
