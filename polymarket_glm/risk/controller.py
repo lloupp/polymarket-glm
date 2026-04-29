@@ -305,7 +305,29 @@ class RiskController:
         This should be called AFTER a fill settles to track realized
         drawdowns. The pre-trade drawdown check is done in check()
         with the current_balance parameter.
+
+        Safety: if peak_balance is absurdly higher than the current
+        balance (e.g. peak=$10K from stale process but balance=$1K),
+        it means the peak is stale from a different initial_balance.
+        Reset it to the current balance to avoid false drawdown.
         """
+        # Stale-peak recovery: if peak > 2x current balance AND peak
+        # is more than 50% above initial_balance, the peak is likely
+        # from a previous session with a different initial_balance.
+        # Reset it to current balance to avoid false drawdown trigger.
+        if self._peak_balance > balance * 2:
+            # Only flag if the gap is suspiciously large (> 50% drawdown from peak)
+            drawdown_pct = (self._peak_balance - balance) / self._peak_balance if self._peak_balance > 0 else 0
+            if drawdown_pct > 0.5 and balance < self._peak_balance:
+                logger.warning(
+                    "Stale peak balance $%.2f is %.0f%% above current $%.2f -- "
+                    "likely stale from previous session. Resetting peak to current balance.",
+                    self._peak_balance,
+                    drawdown_pct * 100,
+                    balance,
+                )
+                self._peak_balance = balance
+
         if balance > self._peak_balance:
             self._peak_balance = balance
         self._check_drawdown(balance)

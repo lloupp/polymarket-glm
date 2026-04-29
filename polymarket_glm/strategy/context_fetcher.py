@@ -506,6 +506,9 @@ class ContextBuilderConfig(BaseModel):
     max_news_articles: int = 3
     max_search_results: int = 2
     max_context_chars: int = 1500
+    max_fetches_per_iteration: int = 5
+    per_market_cooldown_sec: float = 1800.0  # 30 min — don't re-fetch same market within this window
+    empty_result_cooldown_sec: float = 300.0  # 5 min — shorter cooldown for empty results (API rate-limited)
 
     # Sub-configs (will be populated from Settings)
     news_fetcher: NewsFetcherConfig = NewsFetcherConfig()
@@ -542,6 +545,11 @@ class ContextBuilder:
         # Track whether last fetch found context (for confidence penalty)
         self.last_fetch_had_context: bool = True
 
+        # Per-iteration rate limiting
+        self._fetches_this_iteration: int = 0
+        self._iteration_reset_at: float = 0.0  # monotonic timestamp
+        self._market_last_fetched: dict[str, float] = {}  # market_key -> monotonic timestamp
+
     @property
     def has_any_source(self) -> bool:
         """Check if at least one context source is available (including RSS)."""
@@ -566,9 +574,10 @@ class ContextBuilder:
     async def fetch_context(self, question: str) -> str:
         """Fetch news + search context for a market question.
 
-        Priority: NewsAPI → Tavily → RSS (Google News fallback).
+        Priority: NewsAPI -> Tavily -> RSS (Google News fallback).
         RSS is always available as fallback when APIs are rate-limited.
-        Includes TTL cache — same question within cache_ttl_sec returns cached result.
+        Includes TTL cache -- same question within cache_ttl_sec returns cached result.
+        Enforces max_fetches_per_iteration and per_market_cooldown_sec.
         Returns formatted context string, or empty string if nothing available.
         """
         # Check TTL cache first
@@ -581,6 +590,29 @@ class ContextBuilder:
                 return cached_ctx
             else:
                 del self._context_cache[cache_key]
+
+        # Per-market cooldown: don't re-fetch the same question too often
+        now = time.monotonic()
+        cooldown = self.config.per_market_cooldown_sec
+        last_fetch_ts = self._market_last_fetched.get(cache_key, 0.0)
+        if now - last_fetch_ts < cooldown:
+            remaining = cooldown - (now - last_fetch_ts)
+            logger.debug(
+                "ContextBuilder: market cooldown for '%s' (%.0fs remaining)",
+                question[:40], remaining,
+            )
+            return ""
+
+        # Per-iteration fetch cap
+        self._reset_iteration_if_needed(now)
+        if self._fetches_this_iteration >= self.config.max_fetches_per_iteration:
+            logger.debug(
+                "ContextBuilder: iteration fetch cap reached (%d/%d) for '%s'",
+                self._fetches_this_iteration,
+                self.config.max_fetches_per_iteration,
+                question[:40],
+            )
+            return ""
 
         news_articles: list[NewsArticle] = []
         search_results: list[WebSearchResult] = []
@@ -596,11 +628,16 @@ class ContextBuilder:
         if not news_articles and not search_results and self._rss_fetcher.is_available:
             news_articles = await self._safe_fetch_rss(question)
             if news_articles:
-                logger.info("📡 RSS fallback: %d articles for '%s'", len(news_articles), question[:40])
+                logger.info("RSS fallback: %d articles for '%s'", len(news_articles), question[:40])
+
+        # Count this as a fetch attempt
+        self._fetches_this_iteration += 1
+        self._market_last_fetched[cache_key] = now
 
         if not news_articles and not search_results:
-            # Cache empty result too (shorter TTL: 60s) to avoid hammering
-            self._context_cache[cache_key] = (time.monotonic(), "")
+            # Cache empty result too (shorter TTL) to avoid hammering
+            empty_ttl = self.config.empty_result_cooldown_sec
+            self._context_cache[cache_key] = (time.monotonic() - self._cache_ttl + empty_ttl, "")
             self.last_fetch_had_context = False
             return ""
 
@@ -611,12 +648,19 @@ class ContextBuilder:
         logger.debug("ContextBuilder cached context for '%s' (%d chars)", question[:40], len(context))
 
         # Prune expired entries
-        now = time.monotonic()
         expired = [k for k, (ts, _) in self._context_cache.items() if now - ts > self._cache_ttl * 2]
         for k in expired:
             del self._context_cache[k]
 
         return context
+
+    def _reset_iteration_if_needed(self, now: float) -> None:
+        """Reset iteration fetch counter if enough time has passed."""
+        # Reset after cache_ttl (default 600s = 10 min)
+        # This ensures we don't carry stale counters across iterations
+        if now - self._iteration_reset_at > self._cache_ttl:
+            self._fetches_this_iteration = 0
+            self._iteration_reset_at = now
 
     async def _safe_fetch_rss(self, question: str) -> list[NewsArticle]:
         """Fetch RSS with error handling."""
