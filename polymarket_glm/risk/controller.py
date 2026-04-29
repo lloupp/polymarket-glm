@@ -119,10 +119,14 @@ class RiskController:
             elapsed = time.monotonic() - self._kill_switch_at
             if elapsed < self._config.kill_switch_cooldown_sec:
                 return RiskVerdict.KILL_SWITCH, f"Kill switch active: {self._kill_switch_reason}"
-            # Cooldown expired — deactivate
+            # Cooldown expired — deactivate and reset drawdown observations
+            # to prevent immediate re-activation loop (the drawdown that triggered
+            # the kill switch is still present, but we give the system a fresh
+            # observation window after cooldown)
             self._kill_switch_active = False
+            self._drawdown_observations.clear()
             self._clear_kill_switch_file()
-            logger.info("Kill switch cooldown expired — re-enabling trading")
+            logger.info("Kill switch cooldown expired — re-enabling trading (drawdown observations reset)")
 
         # 2. Pre-trade drawdown check using projected balance
         if current_balance is not None:
