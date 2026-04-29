@@ -149,7 +149,7 @@ class DecisionResult(BaseModel):
     edge: float = 0.0
     estimated_prob: float = 0.0
     market_price: float = 0.0
-    confidence: float = 0.0
+    confidence: float | None = None
     ev: float = 0.0
     size_usd: float = 0.0
     reason: str = ""  # Human-readable reason
