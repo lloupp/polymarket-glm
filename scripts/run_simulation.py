@@ -501,33 +501,52 @@ class SimulationEngine:
                     pos, current_price, self._iteration,
                 )
 
-                if should_close:
-                    try:
-                        exit_params = self._position_mgr.calculate_exit_order(
-                            pos, current_price, reason, self._iteration,
+            if should_close:
+                try:
+                    exit_params = self._position_mgr.calculate_exit_order(
+                        pos, current_price, reason, self._iteration,
+                    )
+                    exit_order = OrderRequest(
+                        market_id=exit_params["market_id"],
+                        side=exit_params["side"],
+                        outcome=exit_params["outcome"],
+                        price=exit_params["price"],
+                        size=exit_params["size"],
+                        iteration=exit_params["_iteration"],
+                        close_reason=reason,
+                    )
+                    fill = self._executor.submit_order_sync(exit_order)
+                    if fill.filled:
+                        closed_count += 1
+                        realized_pnl = exit_params.get("_realized_pnl", 0.0)
+                        logger.info(
+                            "📈 Position closed: %s/%s reason=%s pnl=$%.2f entry=%.4f exit=%.4f",
+                            pos.market_id[:12], pos.outcome, reason,
+                            realized_pnl,
+                            pos.avg_price, current_price,
                         )
-                        exit_order = OrderRequest(
-                            market_id=exit_params["market_id"],
-                            side=exit_params["side"],
-                            outcome=exit_params["outcome"],
-                            price=exit_params["price"],
-                            size=exit_params["size"],
-                            iteration=exit_params["_iteration"],
-                            close_reason=reason,
+                        # ── Audit log for CLOSE_POSITION decision ──
+                        cash, pos_val, total = self._portfolio_snapshot()
+                        close_result = DecisionResult(
+                            decision=DecisionType.CLOSE_POSITION,
+                            market_id=pos.market_id,
+                            question="",
+                            outcome=pos.outcome,
+                            signal_type="close",
+                            reason=reason,
+                            market_price=current_price,
+                            ev=realized_pnl,
+                            risk_verdict="allow",
+                            risk_reason="position_management",
+                            portfolio_cash=cash,
+                            portfolio_positions_value=pos_val,
+                            portfolio_total=total,
                         )
-                        fill = self._executor.submit_order_sync(exit_order)
-                        if fill.filled:
-                            closed_count += 1
-                            logger.info(
-                                "📈 Position closed: %s/%s reason=%s pnl=$%.2f entry=%.4f exit=%.4f",
-                                pos.market_id[:12], pos.outcome, reason,
-                                exit_params["_realized_pnl"],
-                                pos.avg_price, current_price,
-                            )
-                        else:
-                            logger.warning("Position close fill failed: %s", fill.reason)
-                    except Exception as exc:
-                        logger.warning("Error closing position %s: %s", pos.market_id[:12], exc)
+                        self._log_audit(close_result)
+                    else:
+                        logger.warning("Position close fill failed: %s", fill.reason)
+                except Exception as exc:
+                    logger.warning("Error closing position %s: %s", pos.market_id[:12], exc)
 
         if closed_count > 0:
             logger.info("Position manager: closed %d positions this iteration", closed_count)
