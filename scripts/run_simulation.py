@@ -39,7 +39,7 @@ from polymarket_glm.monitoring.alerts import AlertManager, Alert, AlertLevel
 from polymarket_glm.monitoring.daily_report import format_daily_report, format_pnl_alert
 from polymarket_glm.ops.telegram_bot import TelegramBot
 from polymarket_glm.ops.health import HealthCheck, check_loop_health
-from polymarket_glm.models import Side
+from polymarket_glm.models import Side, DecisionType, DecisionResult
 
 logging.basicConfig(
     level=logging.INFO,
@@ -424,15 +424,14 @@ class SimulationEngine:
         fills_this_round = 0
         rejections_this_round = 0
 
-        for market in markets[:20]: # cap at 20 markets per iteration
+        for market in markets[:20]:  # cap at 20 markets per iteration
             try:
                 result = await self._process_market(market)
-                if result == "signal":
+                if result.decision in (DecisionType.BUY_YES, DecisionType.BUY_NO):
                     signals_this_round += 1
-                elif result == "filled":
-                    signals_this_round += 1
-                    fills_this_round += 1
-                elif result == "rejected":
+                    if result.reason == "filled":
+                        fills_this_round += 1
+                elif result.decision == DecisionType.REJECT:
                     signals_this_round += 1
                     rejections_this_round += 1
             except Exception as exc:
@@ -573,24 +572,96 @@ class SimulationEngine:
             self._last_report_date = today
             logger.info("📋 Daily report sent")
 
-    async def _process_market(self, market) -> str | None:
-        """Process a single market: fetch book → estimate → signal → risk → execute."""
+    def _log_audit(self, result: DecisionResult) -> None:
+        """Persist a DecisionResult to the audit_log table."""
+        try:
+            db = self._ensure_db()
+            db.save_audit(
+                market_id=result.market_id,
+                question=result.question,
+                decision=result.decision.value,
+                reason=result.reason,
+                signal_type=result.signal_type or "",
+                edge=result.edge or 0,
+                estimated_prob=result.estimated_prob or 0,
+                market_price=result.market_price or 0,
+                confidence=str(result.confidence) if result.confidence is not None else None,
+                ev=result.ev,
+                risk_verdict=result.risk_verdict or "",
+                risk_reason=result.risk_reason or "",
+                portfolio_cash=result.portfolio_cash,
+                portfolio_positions_value=result.portfolio_positions_value,
+                portfolio_total=result.portfolio_total,
+                context_available=result.context_available,
+            )
+        except Exception as exc:
+            logger.warning("Audit log write failed: %s", exc)
+
+    def _portfolio_snapshot(self) -> tuple[float, float, float]:
+        """Return (cash, positions_value, total) for audit snapshot."""
+        acct = self._executor.account
+        cash = acct.balance_usd
+        pos_val = sum(p.size * p.avg_price for p in acct.positions)
+        return cash, pos_val, cash + pos_val
+
+    async def _process_market(self, market) -> DecisionResult:
+        """Process a single market: fetch book → estimate → signal → risk → execute.
+
+        Every code path returns a DecisionResult with structured context.
+        The result is logged to the audit_log table for post-hoc analysis.
+        """
+        market_id = market.market_id
+        question = getattr(market, "question", "") or ""
+        cash, pos_val, total = self._portfolio_snapshot()
+
         # ── Safe mode gates ────────────────────────────────────
         if not self._settings.effective_signals_enabled:
-            logger.debug("⏭ Signals disabled (safe mode) — skipping %s", market.question[:40])
-            return None
+            logger.debug("⏭ Signals disabled (safe mode) — skipping %s", question[:40])
+            result = DecisionResult(
+                decision=DecisionType.HOLD,
+                market_id=market_id,
+                question=question,
+                reason="safe_mode_signals_disabled",
+                portfolio_cash=cash, portfolio_positions_value=pos_val,
+                portfolio_total=total,
+            )
+            self._log_audit(result)
+            return result
 
         # Fetch order book using the FULL CLOB token ID (not the short numeric market_id)
         token_id = market.tokens[0] if market.tokens else None
         if not token_id:
-            logger.info("⏭ Skip %s: no token_id", market.question[:40])
-            return None
+            logger.info("⏭ Skip %s: no token_id", question[:40])
+            result = DecisionResult(
+                decision=DecisionType.HOLD,
+                market_id=market_id,
+                question=question,
+                reason="no_token_id",
+                portfolio_cash=cash, portfolio_positions_value=pos_val,
+                portfolio_total=total,
+            )
+            self._log_audit(result)
+            return result
         book = await self._price_feed.fetch_book(token_id)
         if book is None or not book.bids or not book.asks:
-            logger.info("⏭ Skip %s: no order book", market.question[:40])
-            return None
+            logger.info("⏭ Skip %s: no order book", question[:40])
+            result = DecisionResult(
+                decision=DecisionType.HOLD,
+                market_id=market_id,
+                question=question,
+                reason="no_order_book",
+                portfolio_cash=cash, portfolio_positions_value=pos_val,
+                portfolio_total=total,
+            )
+            self._log_audit(result)
+            return result
+
         # ── Estimator ──
         # Use LLM Router if available, otherwise fall back to Gaussian noise
+        llm_degraded = False
+        edge_source = "gaussian"
+        confidence = None
+        news_context = ""
         if self._use_llm and self._llm_router:
             from polymarket_glm.strategy.estimator import MarketInfo
             mi = MarketInfo(
@@ -600,59 +671,71 @@ class SimulationEngine:
                 current_price=market.outcome_prices[0] if market.outcome_prices else 0.5,
                 category=getattr(market, "category", "") or "",
             )
-        # Fetch news/search context for the Superforecaster prompt
-        news_context = ""
-        if self._context_builder.has_any_source:
-            try:
-                news_context = await self._context_builder.fetch_context(market.question)
-                if news_context:
-                    logger.debug(
-                        "📡 Context fetched (%d chars) for: %s",
-                        len(news_context),
+            # Fetch news/search context for the Superforecaster prompt
+            if self._context_builder.has_any_source:
+                try:
+                    news_context = await self._context_builder.fetch_context(market.question)
+                    if news_context:
+                        logger.debug(
+                            "📡 Context fetched (%d chars) for: %s",
+                            len(news_context),
+                            market.question[:50],
+                        )
+                except Exception as exc:
+                    logger.debug("Context fetch failed for %s: %s", market.question[:30], exc)
+
+            if self._use_llm:
+                try:
+                    estimate = await self._llm_router.estimate(mi, news_context=news_context)
+                except Exception as exc:
+                    # LLM failure → degraded fallback to heuristic
+                    logger.warning("⚠️ LLM estimation failed: %s — falling back to heuristic", exc)
+                    llm_degraded = True
+                    import random
+                    base_prob = market.outcome_prices[0] if market.outcome_prices else 0.5
+                    estimated_prob = max(0.01, min(0.99, base_prob + random.gauss(0, 0.05)))
+                    edge_source = "degraded"
+                    confidence = 0.1  # minimum confidence for degraded mode
+                else:
+                    # Apply confidence penalty if no context was available
+                    if not news_context and self._context_builder.has_any_source:
+                        penalty = self._context_builder.confidence_penalty
+                        if penalty < 1.0:
+                            original_confidence = estimate.confidence
+                            estimate.confidence = original_confidence * penalty
+                            logger.info(
+                                "📉 No context — confidence penalty: %.2f → %.2f (%.0f%% reduction)",
+                                original_confidence, estimate.confidence,
+                                (1.0 - penalty) * 100,
+                            )
+                    estimated_prob = estimate.probability
+                    edge_source = estimate.source
+                    confidence = estimate.confidence
+                    logger.info(
+                        "🧠 LLM estimate: %.2f (confidence=%.2f, source=%s) — %s",
+                        estimated_prob, confidence, edge_source,
                         market.question[:50],
                     )
-            except Exception as exc:
-                logger.debug("Context fetch failed for %s: %s", market.question[:30], exc)
-
-        if self._use_llm:
-            estimate = await self._llm_router.estimate(mi, news_context=news_context)
-            # Apply confidence penalty if no context was available
-            if not news_context and self._context_builder.has_any_source:
-                penalty = self._context_builder.confidence_penalty
-                if penalty < 1.0:
-                    original_confidence = estimate.confidence
-                    estimate.confidence = original_confidence * penalty
-                    logger.info(
-                        "📉 No context — confidence penalty: %.2f → %.2f (%.0f%% reduction)",
-                        original_confidence, estimate.confidence,
-                        (1.0 - penalty) * 100,
-                    )
-            estimated_prob = estimate.probability
-            edge_source = estimate.source
-            logger.info(
-                "🧠 LLM estimate: %.2f (confidence=%.2f, source=%s) — %s",
-                estimated_prob, estimate.confidence, edge_source,
-                market.question[:50],
-            )
-            # MiniMax-specific observability
-            if estimate.web_search_summary:
-                logger.info(
-                    "🔍 MiniMax: prob=%.2f confidence=%s reasoning=%s sources=%s",
-                    estimated_prob, estimate.confidence, estimate.reasoning[:80],
-                    estimate.web_search_summary[:80],
-                )
-            # Log fallback reason if applicable
-            if "fallback" in edge_source or "low_confidence" in edge_source:
-                logger.warning(
-                    "⚠️ Edge source fallback: %s — reason: %s",
-                    edge_source, estimate.reasoning[:100],
-                )
+                    # MiniMax-specific observability
+                    if estimate.web_search_summary:
+                        logger.info(
+                            "🔍 MiniMax: prob=%.2f confidence=%s reasoning=%s sources=%s",
+                            estimated_prob, estimate.confidence, estimate.reasoning[:80],
+                            estimate.web_search_summary[:80],
+                        )
+                    # Log fallback reason if applicable
+                    if "fallback" in edge_source or "low_confidence" in edge_source:
+                        logger.warning(
+                            "⚠️ Edge source fallback: %s — reason: %s",
+                            edge_source, estimate.reasoning[:100],
+                        )
         else:
             # Fallback: Gaussian noise estimator (for testing without LLM keys)
             import random
             base_prob = market.outcome_prices[0] if market.outcome_prices else 0.5
             noise = random.gauss(0, 0.05)
             estimated_prob = max(0.01, min(0.99, base_prob + noise))
+
         # Generate signal
         signal = self._signal_engine.generate_signal(
             market=market,
@@ -662,7 +745,23 @@ class SimulationEngine:
             open_market_ids=self._open_market_ids(),
         )
         if signal is None:
-            return None  # no edge
+            # No edge found — HOLD
+            result = DecisionResult(
+                decision=DecisionType.HOLD,
+                market_id=market_id,
+                question=question,
+                reason="no_edge",
+                signal_type=edge_source,
+                estimated_prob=estimated_prob,
+                edge=0,
+                confidence=confidence,
+                portfolio_cash=cash, portfolio_positions_value=pos_val,
+                portfolio_total=total,
+                context_available=bool(news_context),
+            )
+            self._log_audit(result)
+            return result
+
         logger.info(
             "📈 Signal: %s %s edge=%.4f size=$%.2f",
             signal.signal_type.value,
@@ -670,6 +769,7 @@ class SimulationEngine:
             signal.edge,
             signal.size_usd,
         )
+
         # Risk check (PRE-trade drawdown using projected balance)
         verdict, reason = self._risk.check(
             market_id=signal.market_id,
@@ -679,7 +779,24 @@ class SimulationEngine:
         )
         if verdict != RiskVerdict.ALLOW:
             logger.info("⛔ Risk rejected: %s (%s)", verdict.value, reason)
-            return "rejected"
+            result = DecisionResult(
+                decision=DecisionType.REJECT,
+                market_id=market_id,
+                question=question,
+                reason=f"risk_{verdict.value}",
+                signal_type=signal.signal_type.value,
+                edge=signal.edge,
+                estimated_prob=signal.estimated_prob,
+                market_price=signal.market_price,
+                confidence=confidence,
+                risk_verdict=verdict.value,
+                risk_reason=reason,
+                portfolio_cash=cash, portfolio_positions_value=pos_val,
+                portfolio_total=total,
+                context_available=bool(news_context),
+            )
+            self._log_audit(result)
+            return result
 
         # ── Orders gate (safe mode) ───────────────────────────
         if not self._settings.effective_orders_enabled:
@@ -689,7 +806,26 @@ class SimulationEngine:
                 signal.signal_type.value, signal.outcome,
                 signal.edge, signal.size_usd,
             )
-            return "signal"
+            # Determine BUY_YES vs BUY_NO based on signal type
+            dtype = DecisionType.BUY_NO if signal.signal_type == SignalType.SELL else DecisionType.BUY_YES
+            result = DecisionResult(
+                decision=dtype,
+                market_id=market_id,
+                question=question,
+                reason="safe_mode_orders_disabled",
+                signal_type=signal.signal_type.value,
+                edge=signal.edge,
+                estimated_prob=signal.estimated_prob,
+                market_price=signal.market_price,
+                confidence=confidence,
+                risk_verdict="allow",
+                risk_reason="OK",
+                portfolio_cash=cash, portfolio_positions_value=pos_val,
+                portfolio_total=total,
+                context_available=bool(news_context),
+            )
+            self._log_audit(result)
+            return result
 
         # Execute (paper)
         # In Polymarket, SELL YES without position = BUY NO instead
@@ -697,10 +833,12 @@ class SimulationEngine:
             side = Side.BUY
             outcome = "No"
             price = 1.0 - signal.market_price
+            decision_type = DecisionType.BUY_NO
         else:
             side = Side.BUY
             outcome = signal.outcome
             price = signal.market_price
+            decision_type = DecisionType.BUY_YES
 
         # Mapeamento SELL -> BUY NO está funcionando corretamente
         order = OrderRequest(
@@ -714,6 +852,9 @@ class SimulationEngine:
 
         fill = await self._executor.submit_order(order)
 
+        # Refresh portfolio snapshot after fill attempt
+        cash, pos_val, total = self._portfolio_snapshot()
+
         if fill.filled:
             self._risk.record_fill(signal.market_id, signal.outcome, signal.size_usd)
             logger.info(
@@ -726,10 +867,10 @@ class SimulationEngine:
                     trade_id=fill.order_id,
                     market_id=signal.market_id,
                     side=side.value,
-                    outcome=outcome,  # Usar o outcome correto (No para SELL)
+                    outcome=outcome, # Usar o outcome correto (No para SELL)
                     price=signal.market_price,
                     size=signal.size_usd / signal.market_price if signal.market_price > 0 else 0,
-                    fee=signal.size_usd * 0.01,  # 1% paper fee
+                    fee=signal.size_usd * 0.01, # 1% paper fee
                 )
                 db.save_signal(
                     market_id=signal.market_id,
@@ -740,9 +881,31 @@ class SimulationEngine:
                     size_usd=signal.size_usd,
                     kelly_raw=signal.kelly_raw,
                     kelly_sized=signal.kelly_sized,
+                    outcome=outcome,
+                    confidence=str(confidence) if confidence else None,
+                    ev=signal.edge * signal.size_usd,
                 )
             except Exception as exc:
                 logger.warning("DB record failed: %s", exc)
+
+            result = DecisionResult(
+                decision=decision_type,
+                market_id=market_id,
+                question=question,
+                reason="filled",
+                signal_type=signal.signal_type.value,
+                edge=signal.edge,
+                estimated_prob=signal.estimated_prob,
+                market_price=signal.market_price,
+                confidence=confidence,
+                ev=signal.edge * signal.size_usd,
+                risk_verdict="allow",
+                risk_reason="OK",
+                portfolio_cash=cash, portfolio_positions_value=pos_val,
+                portfolio_total=total,
+                context_available=bool(news_context),
+            )
+            self._log_audit(result)
 
             # Set TP/SL targets on the new position
             pos = self._executor.get_position(signal.market_id, outcome)
@@ -754,17 +917,34 @@ class SimulationEngine:
                     pos.target_price, pos.stop_loss_price,
                 )
 
-                # Alert for fills
-                if self._total_fills <= 5 or self._total_fills % 10 == 0:
-                    await self._send_alert(
-                        "Trade Filled",
-                        f"{side.value.upper()} {signal.outcome} ${signal.size_usd:.2f} @ {signal.market_price:.4f}\n{market.question[:80]}",
-                        "info",
-                    )
-                return "filled"
-            else:
-                logger.info("❌ Fill failed: %s", fill.reason)
-                return "signal"
+            # Alert for fills
+            if self._total_fills <= 5 or self._total_fills % 10 == 0:
+                await self._send_alert(
+                    "Trade Filled",
+                    f"{side.value.upper()} {signal.outcome} ${signal.size_usd:.2f} @ {signal.market_price:.4f}\n{market.question[:80]}",
+                    "info",
+                )
+            return result
+        else:
+            logger.info("❌ Fill failed: %s", fill.reason)
+            result = DecisionResult(
+                decision=DecisionType.HOLD,
+                market_id=market_id,
+                question=question,
+                reason=f"fill_failed:{fill.reason}",
+                signal_type=signal.signal_type.value,
+                edge=signal.edge,
+                estimated_prob=signal.estimated_prob,
+                market_price=signal.market_price,
+                confidence=confidence,
+                risk_verdict="allow",
+                risk_reason="OK",
+                portfolio_cash=cash, portfolio_positions_value=pos_val,
+                portfolio_total=total,
+                context_available=bool(news_context),
+            )
+            self._log_audit(result)
+            return result
 
     async def _shutdown(self) -> None:
         """Graceful shutdown."""
