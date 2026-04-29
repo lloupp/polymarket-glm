@@ -36,6 +36,8 @@ class RiskVerdict(str, enum.Enum):
     DENY_CATEGORY_LIMIT = "deny_category_limit"
     DENY_SPREAD = "deny_spread"
     DENY_COOLDOWN = "deny_cooldown"
+    DENY_VOLUME = "deny_volume"
+    DENY_LIQUIDITY = "deny_liquidity"
     KILL_SWITCH = "kill_switch"
     DENY_DRAWDOWN = "deny_drawdown"
 
@@ -94,6 +96,8 @@ class RiskController:
         current_balance: float | None = None,
         category: str | None = None,
         spread_bps: int | None = None,
+        volume_usd: float | None = None,
+        liquidity_usd: float | None = None,
     ) -> tuple[RiskVerdict, str]:
         """Pre-trade risk check. Returns (verdict, reason).
 
@@ -107,6 +111,8 @@ class RiskController:
                 the trade executes, not after.
             category: Market category (e.g. "politics", "sports").
             spread_bps: Current bid-ask spread in basis points.
+            volume_usd: Market 24h volume in USD (optional).
+            liquidity_usd: Order book liquidity in USD (optional).
         """
         # 1. Kill switch check (with cooldown)
         if self._kill_switch_active:
@@ -218,6 +224,20 @@ class RiskController:
             return RiskVerdict.DENY_DAILY_LIMIT, (
                 f"Daily loss ${self._daily_loss:.2f} reached limit "
                 f"${self._config.daily_loss_limit_usd:.2f}"
+            )
+
+        # 11. Volume gate
+        if volume_usd is not None and volume_usd < self._config.min_volume_usd:
+            return RiskVerdict.DENY_VOLUME, (
+                f"Market volume ${volume_usd:,.0f} below minimum "
+                f"${self._config.min_volume_usd:,.0f}"
+            )
+
+        # 12. Liquidity gate
+        if liquidity_usd is not None and liquidity_usd < self._config.min_liquidity_usd:
+            return RiskVerdict.DENY_LIQUIDITY, (
+                f"Order book liquidity ${liquidity_usd:,.0f} below minimum "
+                f"${self._config.min_liquidity_usd:,.0f}"
             )
 
         return RiskVerdict.ALLOW, "OK"

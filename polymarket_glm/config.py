@@ -35,6 +35,9 @@ class RiskConfig(BaseModel):
     max_spread_bps: int = Field(default=500, gt=0)
     # Cooldown between trades on same market
     trade_cooldown_sec: float = Field(default=300.0, ge=0)
+    # Volume/liquidity gates (checked in RiskController)
+    min_volume_usd: float = Field(default=10_000.0, gt=0, description="Minimum market volume in USD")
+    min_liquidity_usd: float = Field(default=5_000.0, gt=0, description="Minimum order book liquidity in USD")
 
 
 class ClobConfig(BaseModel):
