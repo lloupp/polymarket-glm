@@ -27,11 +27,11 @@ def _make_market(market_id="m1", question="Will X happen?"):
     )
 
 
-def _make_book(bid=0.58, ask=0.62):
+def _make_book(bid=0.58, ask=0.62, bid_size=5000, ask_size=5000):
     return OrderBook(
         market_id="m1",
-        bids=[OrderBookLevel(price=bid, size=100.0)],
-        asks=[OrderBookLevel(price=ask, size=100.0)],
+        bids=[OrderBookLevel(price=bid, size=bid_size)],
+        asks=[OrderBookLevel(price=ask, size=ask_size)],
     )
 
 

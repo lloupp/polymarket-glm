@@ -451,6 +451,43 @@ class RiskController:
         except Exception as exc:
             logger.warning("Failed to restore kill switch: %s", exc)
 
+    # ── State Persistence ──────────────────────────────────────
+
+    def export_state(self) -> dict:
+        """Export risk controller state as a JSON-serializable dict."""
+        return {
+            "version": 1,
+            "market_exposure": dict(self._market_exposure),
+            "daily_loss": self._daily_loss,
+            "peak_balance": self._peak_balance,
+            "market_categories": dict(self._market_categories),
+            "category_exposure": dict(self._category_exposure),
+            "last_trade_at": {k: v for k, v in self._last_trade_at.items()},
+        }
+
+    def import_state(self, state: dict) -> None:
+        """Restore risk controller state from a previously exported dict."""
+        from collections import defaultdict
+
+        version = state.get("version", 0)
+        if version != 1:
+            raise ValueError(f"Unsupported risk state version: {version}")
+
+        self._market_exposure = defaultdict(float, state.get("market_exposure", {}))
+        self._daily_loss = state.get("daily_loss", 0.0)
+        self._peak_balance = state.get("peak_balance", self._peak_balance)
+        self._market_categories = state.get("market_categories", {})
+        self._category_exposure = defaultdict(float, state.get("category_exposure", {}))
+        self._last_trade_at = state.get("last_trade_at", {})
+
+        logger.info(
+            "Risk state restored: exposure=$%.2f daily_loss=$%.2f peak=$%.2f markets=%d",
+            sum(self._market_exposure.values()),
+            self._daily_loss,
+            self._peak_balance,
+            len(self._market_exposure),
+        )
+
     def reset_daily(self) -> None:
         """Reset daily loss counter (call at start of new trading day)."""
         self._daily_loss = 0.0

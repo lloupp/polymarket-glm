@@ -144,6 +144,27 @@ class PaperExecutor:
         fee = self._calc_fee(request.price, request.size)
         total_cost = request.price * request.size + fee
 
+        # Dedup: reject BUY if position already open for this market_id + outcome
+        # (unless allow_duplicate=True, which permits average-up/down)
+        if request.side == Side.BUY and not request.close_reason and not request.allow_duplicate:
+            existing = self._positions.get(request.market_id, {}).get(request.outcome)
+            if existing is not None and existing.size > 0:
+                logger.warning(
+                    "Paper: duplicate position rejected — %s/%s already has size=%.0f",
+                    request.market_id, request.outcome, existing.size,
+                )
+                return FillResult(
+                    order_id=order_id,
+                    market_id=request.market_id,
+                    side=request.side,
+                    outcome=request.outcome,
+                    price=request.price,
+                    size=0,
+                    fee=0,
+                    filled=False,
+                    reason=f"Duplicate position: {request.market_id}/{request.outcome} already open (size={existing.size:.0f})",
+                )
+
         # Check balance for buys
         if request.side == Side.BUY:
             if total_cost > self._balance:
@@ -183,6 +204,7 @@ class PaperExecutor:
                     stop_loss_price=existing.stop_loss_price,
                     opened_at_iteration=existing.opened_at_iteration,
                     status=existing.status,
+                    end_date_iso=existing.end_date_iso or request.end_date_iso,
                 )
             elif request.side == Side.SELL:
                 new_size = existing.size - request.size
@@ -232,6 +254,7 @@ class PaperExecutor:
                     avg_price=request.price,
                     opened_at_iteration=request.iteration,
                     status="open",
+                    end_date_iso=request.end_date_iso,
                 )
             else:
                 # Can't sell what we don't have
@@ -281,3 +304,74 @@ class PaperExecutor:
 
     async def get_open_orders(self, market_id: str | None = None) -> list[OrderRequest]:
         return []  # Paper fills instantly, no open orders
+
+    # ── State Persistence ──────────────────────────────────────
+
+    def export_state(self) -> dict:
+        """Export the full executor state as a JSON-serializable dict.
+
+        Used to persist state across process restarts.
+        Includes: balance, positions, trade history, fees, realized P&L.
+        """
+        positions_data = {}
+        for market_id, outcomes in self._positions.items():
+            for outcome, pos in outcomes.items():
+                key = f"{market_id}/{outcome}"
+                positions_data[key] = pos.model_dump()
+
+        return {
+            "version": 1,
+            "initial_balance": self._initial_balance,
+            "balance": self._balance,
+            "fee_rate_bps": self._fee_rate_bps,
+            "total_fees_paid": self._total_fees_paid,
+            "total_realized_pnl": self._total_realized_pnl,
+            "positions": positions_data,
+            "trade_history": [fill.model_dump() for fill in self._trade_history],
+        }
+
+    def import_state(self, state: dict) -> None:
+        """Restore executor state from a previously exported dict.
+
+        Overwrites all in-memory state. Validates version field.
+        """
+        version = state.get("version", 0)
+        if version != 1:
+            raise ValueError(f"Unsupported state version: {version}")
+
+        self._initial_balance = state["initial_balance"]
+        self._balance = state["balance"]
+        self._fee_rate_bps = state["fee_rate_bps"]
+        self._total_fees_paid = state["total_fees_paid"]
+        self._total_realized_pnl = state["total_realized_pnl"]
+
+        # Restore positions
+        self._positions = defaultdict(dict)
+        for key, pos_data in state["positions"].items():
+            market_id, outcome = key.split("/", 1)
+            self._positions[market_id][outcome] = Position(**pos_data)
+
+        # Restore trade history
+        self._trade_history = [FillResult(**fd) for fd in state["trade_history"]]
+
+        logger.info(
+            "State restored: balance=$%.2f positions=%d trades=%d",
+            self._balance, sum(len(v) for v in self._positions.values()),
+            len(self._trade_history),
+        )
+
+    def save_state(self, path: str) -> None:
+        """Export state and save to a JSON file."""
+        import json
+        state = self.export_state()
+        with open(path, "w") as f:
+            json.dump(state, f, indent=2)
+        logger.info("State saved to %s", path)
+
+    def load_state(self, path: str) -> None:
+        """Load state from a JSON file and import."""
+        import json
+        with open(path) as f:
+            state = json.load(f)
+        self.import_state(state)
+        logger.info("State loaded from %s", path)

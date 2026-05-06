@@ -90,8 +90,8 @@ class TestDryRunFullPipeline:
         )
         book = OrderBook(
             market_id="test-market-1",
-            bids=[OrderBookLevel(price=0.50, size=100)],
-            asks=[OrderBookLevel(price=0.55, size=100)],
+            bids=[OrderBookLevel(price=0.50, size=5000)],
+            asks=[OrderBookLevel(price=0.55, size=5000)],
         )
 
         # Signal: estimated_prob=0.70 vs market=0.50 → big edge

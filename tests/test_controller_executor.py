@@ -52,11 +52,13 @@ def _make_book(
     market_id: str = "mkt_001",
     bid: float = 0.39,
     ask: float = 0.41,
+    bid_size: float = 5000,
+    ask_size: float = 5000,
 ) -> OrderBook:
     return OrderBook(
         market_id=market_id,
-        bids=[OrderBookLevel(price=bid, size=100)],
-        asks=[OrderBookLevel(price=ask, size=100)],
+        bids=[OrderBookLevel(price=bid, size=bid_size)],
+        asks=[OrderBookLevel(price=ask, size=ask_size)],
     )
 
 
@@ -161,8 +163,8 @@ class TestSignalController:
         # Spread > 500 bps (5%)
         book = OrderBook(
             market_id="mkt_001",
-            bids=[OrderBookLevel(price=0.35, size=100)],
-            asks=[OrderBookLevel(price=0.65, size=100)],
+            bids=[OrderBookLevel(price=0.35, size=5000)],
+            asks=[OrderBookLevel(price=0.65, size=5000)],
         )
         assert ctrl.filter_market(market, book) is False
 

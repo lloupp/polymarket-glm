@@ -124,10 +124,12 @@ class Position(BaseModel):
     stop_loss_price: float | None = None  # stop-loss price
     opened_at_iteration: int = 0
     status: str = "open"  # "open" | "closed"
-    close_reason: str = ""  # "take_profit" | "stop_loss" | "resolved" | "manual"
+    close_reason: str = ""  # "take_profit" | "stop_loss" | "resolved" | "manual" | "expired"
     realized_pnl: float = 0.0
     close_price: float | None = None
     closed_at_iteration: int | None = None
+    # Market expiry — copied from Market.end_date_iso at position open time
+    end_date_iso: str = ""
 
 
 class DecisionType(str, enum.Enum):

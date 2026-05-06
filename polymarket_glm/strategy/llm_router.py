@@ -546,10 +546,17 @@ class LLMRouter:
                     if tracker:
                         tracker.record_call()
                     return result
+
+                # Exponential backoff on failure: 1s, 2s, 4s...
+                backoff = min(2 ** attempt, 8)
                 logger.debug(
-                    "Provider %s attempt %d failed: %s",
-                    provider.name, attempt + 1, result.reasoning[:80],
+                    "Provider %s attempt %d failed (conf=%.2f): %s — backing off %ds",
+                    provider.name, attempt + 1, result.confidence,
+                    result.reasoning[:80], backoff,
                 )
+                if attempt < self._config.max_retries_per_provider - 1:
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(backoff)
 
             # All retries exhausted for this provider, move to next
             logger.info("Provider %s exhausted, trying next", provider.name)
@@ -677,15 +684,9 @@ class LLMRouter:
                 # Map text confidence to float
                 confidence = _map_confidence(confidence)
 
-            # confidence low → force fallback
-            if confidence < 0.3:
-                return EstimateResult(
-                    probability=0.5,
-                    confidence=0.0,
-                    source=f"llm_{provider_name}_low_confidence",
-                    reasoning=f"Low confidence ({confidence:.2f}): {reasoning[:100]}",
-                    web_search_summary=sources or web_search_summary,
-                )
+            # confidence very low → reduce but don't force zero (avoids false "all failed")
+            if confidence < 0.15:
+                confidence = 0.05  # minimal confidence, still counts as success
 
             return EstimateResult(
                 probability=round(probability, 4),

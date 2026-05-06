@@ -25,6 +25,8 @@ class OrderRequest(BaseModel):
     # Optional metadata for position management (used by PaperExecutor)
     iteration: int = 0  # cycle when order was placed
     close_reason: str = ""  # "take_profit" | "stop_loss" | "" for new entries
+    allow_duplicate: bool = False  # allow adding to existing position (average up/down)
+    end_date_iso: str = ""  # market expiry — propagated to Position for auto-close
 
     @property
     def usd_value(self) -> float:

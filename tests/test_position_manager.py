@@ -162,3 +162,99 @@ class TestRealizedPnL:
         pos = _open_yes(avg_price=0.10, size=100.0)
         pnl = PositionManager._calculate_realized_pnl(pos, exit_price=0.10)
         assert pnl == pytest.approx(0.0)
+
+
+# ── Market Auto-Close (Expiry) Tests ──────────────────────────
+
+class TestExpiryAutoClose:
+    def test_should_close_expired_market(self, mgr):
+        """Position with end_date in the past should be closed."""
+        from datetime import datetime, timezone, timedelta
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        pos = Position(
+            market_id="m1", outcome="Yes", size=50.0,
+            avg_price=0.60, status="open", opened_at_iteration=1,
+            end_date_iso=past,
+        )
+        should, reason = mgr.should_close(pos, current_price=0.55, current_iteration=5)
+        assert should
+        assert reason == "expired"
+
+    def test_should_not_close_future_market(self, mgr):
+        """Position with end_date in the future should NOT be closed by expiry."""
+        from datetime import datetime, timezone, timedelta
+        future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+        pos = Position(
+            market_id="m1", outcome="Yes", size=50.0,
+            avg_price=0.60, status="open", opened_at_iteration=1,
+            end_date_iso=future,
+        )
+        should, reason = mgr.should_close(pos, current_price=0.55, current_iteration=5)
+        assert not should
+
+    def test_no_expiry_check_without_end_date(self, mgr):
+        """Position without end_date_iso should skip expiry check."""
+        pos = Position(
+            market_id="m1", outcome="Yes", size=50.0,
+            avg_price=0.60, status="open", opened_at_iteration=1,
+            end_date_iso="",
+        )
+        should, reason = mgr.should_close(pos, current_price=0.60, current_iteration=5)
+        assert not should  # no edge → holding
+
+    def test_invalid_end_date_doesnt_crash(self, mgr):
+        """Invalid end_date_iso should be handled gracefully."""
+        pos = Position(
+            market_id="m1", outcome="Yes", size=50.0,
+            avg_price=0.60, status="open", opened_at_iteration=1,
+            end_date_iso="not-a-date",
+        )
+        should, reason = mgr.should_close(pos, current_price=0.60, current_iteration=5)
+        assert not should  # no crash, falls through to holding
+
+    def test_expired_skips_min_hold_check(self, mgr):
+        """Expired market should close even if min_hold_iterations not reached."""
+        from datetime import datetime, timezone, timedelta
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        pos = Position(
+            market_id="m1", outcome="Yes", size=50.0,
+            avg_price=0.60, status="open", opened_at_iteration=5,
+            end_date_iso=past,
+        )
+        # Same iteration → min_hold not reached, but expiry overrides
+        should, reason = mgr.should_close(pos, current_price=0.55, current_iteration=5)
+        assert should
+        assert reason == "expired"
+
+
+class TestFindExpiredPositions:
+    def test_find_expired_batch(self, mgr):
+        """find_expired_positions returns only open positions past end_date."""
+        from datetime import datetime, timezone, timedelta
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+
+        positions = [
+            Position(market_id="m1", outcome="Yes", size=50, avg_price=0.5,
+                     status="open", end_date_iso=past),
+            Position(market_id="m2", outcome="No", size=30, avg_price=0.4,
+                     status="open", end_date_iso=future),
+            Position(market_id="m3", outcome="Yes", size=20, avg_price=0.6,
+                     status="open", end_date_iso=""),
+            Position(market_id="m4", outcome="Yes", size=10, avg_price=0.3,
+                     status="closed", end_date_iso=past),
+        ]
+        expired = mgr.find_expired_positions(positions)
+        assert len(expired) == 1
+        assert expired[0].market_id == "m1"
+
+    def test_find_expired_none(self, mgr):
+        """No expired positions returns empty list."""
+        from datetime import datetime, timezone, timedelta
+        future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+        positions = [
+            Position(market_id="m1", outcome="Yes", size=50, avg_price=0.5,
+                     status="open", end_date_iso=future),
+        ]
+        expired = mgr.find_expired_positions(positions)
+        assert expired == []

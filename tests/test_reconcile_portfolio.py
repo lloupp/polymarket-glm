@@ -72,9 +72,15 @@ class TestReconcileSingleBuy:
 
     def test_multiple_buys_reconcile(self):
         ex = PaperExecutor(initial_balance=1_000.0, fee_rate_bps=100)
-        _buy(ex, "m1", "Yes", 0.60, 50.0)   # $30 + $0.30 fee
-        _buy(ex, "m2", "No", 0.40, 75.0)     # $30 + $0.30 fee
-        _buy(ex, "m1", "Yes", 0.65, 50.0)    # $32.50 + $0.325 fee
+        _buy(ex, "m1", "Yes", 0.60, 50.0) # $30 + $0.30 fee
+        _buy(ex, "m2", "No", 0.40, 75.0) # $30 + $0.30 fee
+        # Third buy: average-up on m1/Yes — requires allow_duplicate=True
+        req3 = OrderRequest(
+            market_id="m1", side=Side.BUY, outcome="Yes",
+            price=0.65, size=50.0, iteration=1, allow_duplicate=True,
+        )
+        fill3 = ex.submit_order_sync(req3)
+        assert fill3.filled, f"Average-up fill failed: {fill3.reason}"
 
         result = ex.reconcile_portfolio()
         assert result["consistent"], f"Portfolio inconsistent: {result}"

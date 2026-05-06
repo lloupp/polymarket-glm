@@ -1,4 +1,4 @@
-"""Position manager — monitors open positions for take-profit / stop-loss.
+"""Position manager — monitors open positions for take-profit / stop-loss / expiry.
 
 Adapts the existing PaperExecutor + Position model to support buy-low/sell-high
 before event resolution. Uses the same Side/outcome conventions already in use.
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from polymarket_glm.models import Position, Side
 
@@ -44,6 +45,16 @@ class PositionManager:
         if position.status != "open":
             return False, "already_closed"
 
+        # ── Expiry check: close if market end_date has passed ──
+        if position.end_date_iso:
+            try:
+                end_dt = datetime.fromisoformat(position.end_date_iso.replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) >= end_dt:
+                    return True, "expired"
+            except (ValueError, TypeError):
+                logger.warning("Invalid end_date_iso on position %s: %r",
+                               position.market_id, position.end_date_iso)
+
         # Don't close too early
         hold_iterations = current_iteration - position.opened_at_iteration
         if hold_iterations < self._config.min_hold_iterations:
@@ -70,6 +81,27 @@ class PositionManager:
             return True, "stop_loss"
 
         return False, "holding"
+
+    def find_expired_positions(
+        self,
+        positions: list[Position],
+    ) -> list[Position]:
+        """Return all open positions whose market has expired.
+
+        Convenience method for batch expiry checking without needing
+        current_price or current_iteration.
+        """
+        expired = []
+        for pos in positions:
+            if pos.status != "open" or not pos.end_date_iso:
+                continue
+            try:
+                end_dt = datetime.fromisoformat(pos.end_date_iso.replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) >= end_dt:
+                    expired.append(pos)
+            except (ValueError, TypeError):
+                continue
+        return expired
 
     def calculate_exit_order(
         self,

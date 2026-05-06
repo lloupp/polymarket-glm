@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "iteration": 42,
+  "total_signals": 10,
+  "total_fills": 3,
+  "total_rejections": 2,
+  "executor": {
+    "version": 1,
+    "initial_balance": 1000.0,
+    "balance": 1000.0,
+    "fee_rate_bps": 100,
+    "total_fees_paid": 0.0,
+    "total_realized_pnl": 0.0,
+    "positions": {},
+    "trade_history": []
+  },
+  "risk": {
+    "version": 1,
+    "market_exposure": {},
+    "daily_loss": 0.0,
+    "peak_balance": 1000.0,
+    "market_categories": {},
+    "category_exposure": {},
+    "last_trade_at": {}
+  }
+}
