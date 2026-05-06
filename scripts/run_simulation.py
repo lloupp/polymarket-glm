@@ -37,11 +37,6 @@ from polymarket_glm.execution.position_manager import PositionManager, PositionM
 from polymarket_glm.storage.database import Database
 from polymarket_glm.monitoring.alerts import AlertManager, Alert, AlertLevel
 from polymarket_glm.monitoring.daily_report import format_daily_report, format_pnl_alert
-from polymarket_glm.monitoring.telegram_formatters import (
-    format_cycle_summary, format_signals_batch, format_closed_positions,
-    format_market_resolved,
-    CycleSummaryData, SignalData, ClosedPositionData, MarketResolvedData,
-)
 from polymarket_glm.ops.telegram_bot import TelegramBot
 from polymarket_glm.ops.health import HealthCheck, check_loop_health
 from polymarket_glm.models import Side, DecisionType, DecisionResult
@@ -203,20 +198,15 @@ class SimulationEngine:
         # Health checker
         self._health = HealthCheck()
 
-    # State
-    self._iteration = 0
-    self._last_report_date: str = "" # track daily report sending
-    self._total_signals = 0
-    self._total_fills = 0
-    self._total_rejections = 0
-    self._running = False
-    self._stop_event = asyncio.Event()
-    self._last_loop_time = 0.0
-    self._iteration_errors: list[str] = []
-
-    # State persistence — save/load executor + risk across restarts
-    self._state_file = str(PROJECT_ROOT / "data" / "simulation_state.json")
-    self._state_save_interval = 5  # save every N iterations
+        # State
+        self._iteration = 0
+        self._last_report_date: str = ""  # track daily report sending
+        self._total_signals = 0
+        self._total_fills = 0
+        self._total_rejections = 0
+        self._running = False
+        self._stop_event = asyncio.Event()
+        self._last_loop_time = 0.0
 
     # ── Providers for Telegram bot ──────────────────────────
 
@@ -297,22 +287,17 @@ class SimulationEngine:
         """Run the simulation loop."""
         self._running = True
 
-        # Restore state from previous session (if available)
-        restored = self._restore_state()
-
         # PAPER MODE ACTIVE banner
         if self._settings.execution_mode == ExecutionMode.PAPER:
             logger.info("=" * 60)
             logger.info("📋 PAPER MODE ACTIVE — live_orders=disabled")
             logger.info("=" * 60)
 
-        balance_display = self._executor.account.balance_usd
         logger.info(
-            "🚀 Simulation started (mode=%s, interval=%.0fs, balance=$%.2f%s)",
+            "🚀 Simulation started (mode=%s, interval=%.0fs, balance=$%.2f)",
             self._settings.execution_mode.value,
             self._scan_interval,
-            balance_display,
-            " [RESTORED]" if restored else "",
+            self._settings.paper_balance_usd,
         )
 
         # Startup alert
@@ -336,17 +321,13 @@ class SimulationEngine:
                     logger.info("Max iterations (%d) reached", self._max_iterations)
                     break
 
-            try:
-                await self._run_iteration()
-                self._health.record_heartbeat(iteration=self._iteration, mode="paper")
-            except Exception as exc:
-                self._health.record_error(str(exc))
-                logger.warning("Iteration %d failed: %s", self._iteration, exc)
-            self._iteration += 1
-
-            # Periodic state save
-            if self._iteration % self._state_save_interval == 0:
-                self._save_state()
+                try:
+                    await self._run_iteration()
+                    self._health.record_heartbeat(iteration=self._iteration, mode="paper")
+                except Exception as exc:
+                    self._health.record_error(str(exc))
+                    logger.warning("Iteration %d failed: %s", self._iteration, exc)
+                self._iteration += 1
 
                 # Health check
                 try:
@@ -356,13 +337,13 @@ class SimulationEngine:
                 except Exception:
                     pass
 
-            # Wait for next iteration
-            if not self._stop_event.is_set():
-                try:
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=self._scan_interval)
-                    self._stop_event.set()  # stop_event was set — signal loop exit
-                except asyncio.TimeoutError:
-                    pass # normal — next iteration
+                # Wait for next iteration
+                if not self._stop_event.is_set():
+                    try:
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=self._scan_interval)
+                        break  # stop_event was set
+                    except asyncio.TimeoutError:
+                        pass  # normal — next iteration
 
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
@@ -429,165 +410,9 @@ class SimulationEngine:
         return {p.market_id for p in self._executor.account.positions}
 
     async def _run_iteration(self) -> None:
-        """One full scan → estimate → signal → risk → execute cycle.
-
-        SEEK & MONITOR MODE:
-        - If positions are open → MONITOR: skip market scan, only check TP/SL
-        - If no positions → SEEK: scan markets, stop at first fill
-        """
+        """One full scan → estimate → signal → risk → execute cycle."""
         self._last_loop_time = time.time()
         logger.info("── Iteration %d ──", self._iteration + 1)
-
-        # ── SEEK & MONITOR: check if we have open positions ──
-        acct = self._executor.account
-        open_positions = [p for p in acct.positions if p.status == "open"]
-
-        if open_positions:
-            # ── MONITOR MODE: only manage existing positions ──
-            logger.info(
-                "🔍 MONITOR mode: %d open position(s), skipping market scan",
-                len(open_positions),
-            )
-
-            # Fetch current market prices for monitoring
-            try:
-                markets = await self._fetcher.fetch_markets(self._market_filter)
-            except Exception as exc:
-                logger.warning("Market fetch for monitoring failed: %s", exc)
-                markets = []
-
-            # Settlement check
-            resolved = {m.market_id: m.outcomes[0] for m in markets if getattr(m, "closed", False)}
-            if resolved and acct.positions:
-                settlement_summary = self._settlement.check_settlements(
-                    positions=acct.positions,
-                    resolved_markets=resolved,
-                )
-                if settlement_summary.num_settled > 0:
-                    for s in settlement_summary.settlements:
-                        self._executor._balance += s.proceeds
-                        mp = self._executor._positions.get(s.market_id)
-                        if mp and s.outcome in mp:
-                            del mp[s.outcome]
-                        if not mp:
-                            del self._executor._positions[s.market_id]
-                    logger.info(
-                        "🏛️ Settled %d markets: realized P&L=$%.2f",
-                        settlement_summary.num_settled,
-                        settlement_summary.total_realized_pnl,
-                    )
-                    acct = self._executor.account
-
-            # TP/SL check for open positions
-            closed_count = 0
-            for pos in acct.positions:
-                if pos.status != "open":
-                    continue
-                current_price = None
-                for m in markets:
-                    if m.market_id == pos.market_id and m.outcome_prices:
-                        if pos.outcome.upper() == "YES":
-                            current_price = m.outcome_prices[0]
-                        elif pos.outcome.upper() == "NO":
-                            current_price = m.outcome_prices[1] if len(m.outcome_prices) > 1 else (1 - m.outcome_prices[0])
-                        break
-
-                if current_price is None:
-                    logger.debug("No price for %s/%s — keeping position open", pos.market_id[:12], pos.outcome)
-                    continue
-
-                should_close, reason = self._position_mgr.should_close(
-                    pos, current_price, self._iteration,
-                )
-
-                if should_close:
-                    try:
-                        exit_params = self._position_mgr.calculate_exit_order(
-                            pos, current_price, reason, self._iteration,
-                        )
-                        exit_order = OrderRequest(
-                            market_id=exit_params["market_id"],
-                            side=exit_params["side"],
-                            outcome=exit_params["outcome"],
-                            price=exit_params["price"],
-                            size=exit_params["size"],
-                            iteration=exit_params["_iteration"],
-                            close_reason=reason,
-                        )
-                        fill = self._executor.submit_order_sync(exit_order)
-                        if fill.filled:
-                            closed_count += 1
-                            realized_pnl = exit_params.get("_realized_pnl", 0.0)
-                            logger.info(
-                                "📈 Position closed: %s/%s reason=%s pnl=$%.2f entry=%.4f exit=%.4f",
-                                pos.market_id[:12], pos.outcome, reason,
-                                realized_pnl,
-                                pos.avg_price, current_price,
-                            )
-                            # Audit log for close
-                            cash, pos_val, total = self._portfolio_snapshot()
-                            close_result = DecisionResult(
-                                decision=DecisionType.CLOSE_POSITION,
-                                market_id=pos.market_id,
-                                question="",
-                                outcome=pos.outcome,
-                                signal_type="close",
-                                reason=reason,
-                                market_price=current_price,
-                                llm_source="position_manager",
-                                llm_state="normal",
-                                ev=realized_pnl,
-                                risk_verdict="allow",
-                                risk_reason="position_management",
-                                portfolio_cash=cash,
-                                portfolio_positions_value=pos_val,
-                                portfolio_total=total,
-                            )
-                            self._log_audit(close_result)
-                            # Telegram alert for closed position
-                            if self._bot:
-                                try:
-                                    pnl_pct = (current_price - pos.avg_price) / pos.avg_price * 100 if pos.avg_price > 0 else 0
-                                    msg = (
-                                        f"📈 **Position Closed**\n"
-                                        f"Market: {pos.market_id[:12]}\n"
-                                        f"Reason: {reason}\n"
-                                        f"PnL: ${realized_pnl:+.2f} ({pnl_pct:+.1f}%)\n"
-                                        f"Entry: {pos.avg_price:.4f} → Exit: {current_price:.4f}"
-                                    )
-                                    await self._bot.send_message(msg)
-                                except Exception as e:
-                                    logger.warning("Telegram close alert failed: %s", e)
-                        else:
-                            logger.warning("Position close fill failed: %s", fill.reason)
-                    except Exception as exc:
-                        logger.warning("Error closing position %s: %s", pos.market_id[:12], exc)
-
-            # Log position status summary
-            still_open = [p for p in self._executor.account.positions if p.status == "open"]
-            if closed_count > 0:
-                logger.info("Monitor: closed %d positions, %d still open", closed_count, len(still_open))
-            elif still_open:
-                # Log current P&L for remaining positions
-                for pos in still_open:
-                    cur_price = None
-                    for m in markets:
-                        if m.market_id == pos.market_id and m.outcome_prices:
-                            cur_price = m.outcome_prices[0] if pos.outcome.upper() == "YES" else (1 - m.outcome_prices[0])
-                            break
-                    if cur_price is not None:
-                        unrealized = (cur_price - pos.avg_price) * pos.size
-                        logger.info(
-                            "📊 Monitoring: %s/%s entry=%.4f cur=%.4f unrealized=$%.2f",
-                            pos.market_id[:12], pos.outcome, pos.avg_price, cur_price, unrealized,
-                        )
-
-            # Update balance for drawdown check
-            acct = self._executor.account
-            self._risk.update_balance(acct.balance_usd)
-            return  # End of MONITOR iteration
-
-        # ── SEEK MODE: scan for new opportunities ──
 
         # 1. Scan markets
         try:
@@ -605,36 +430,19 @@ class SimulationEngine:
         signals_this_round = 0
         fills_this_round = 0
         rejections_this_round = 0
-        round_signals: list[SignalData] = []
-        self._iteration_errors = []
 
-    for market in markets[:20]: # cap at 20 markets per iteration
-        try:
-            result = await self._process_market(market)
-            if result.decision in (DecisionType.BUY_YES, DecisionType.BUY_NO):
-                signals_this_round += 1
-                # Track signal data for Telegram formatter
-                round_signals.append(SignalData(
-                    market_slug=result.market_id[:20],
-                    market_question=result.question or "",
-                    side=result.decision.value,
-                    price=result.market_price or 0,
-                    edge=result.edge or 0,
-                    position_size_usd=0, # filled below
-                    reason=result.signal_type or "",
-                ))
-                if result.reason == "filled":
-                    fills_this_round += 1
-                    # SEEK & MONITOR: stop scanning after first fill
-                    logger.info("🎯 First fill found — switching to MONITOR mode")
-                    break
-            else:
-                if result.decision == DecisionType.REJECT:
+        for market in markets[:20]:  # cap at 20 markets per iteration
+            try:
+                result = await self._process_market(market)
+                if result.decision in (DecisionType.BUY_YES, DecisionType.BUY_NO):
+                    signals_this_round += 1
+                    if result.reason == "filled":
+                        fills_this_round += 1
+                elif result.decision == DecisionType.REJECT:
                     signals_this_round += 1
                     rejections_this_round += 1
-        except Exception as exc:
+            except Exception as exc:
                 logger.warning("Error processing %s: %s", market.market_id, exc)
-                self._iteration_errors.append(str(exc)[:200])
 
         self._total_signals += signals_this_round
         self._total_fills += fills_this_round
@@ -645,13 +453,6 @@ class SimulationEngine:
                 "Round summary: %d signals, %d fills, %d rejected",
                 signals_this_round, fills_this_round, rejections_this_round,
             )
-            # ── Telegram: Signal batch ──
-            if self._bot and round_signals:
-                sig_msg = format_signals_batch(round_signals[:10])
-                try:
-                    await self._bot.send_message(sig_msg)
-                except Exception as e:
-                    logger.warning("Telegram signal batch failed: %s", e)
 
         # Update balance for drawdown check
         acct = self._executor.account
@@ -759,26 +560,6 @@ class SimulationEngine:
         if closed_count > 0:
             logger.info("Position manager: closed %d positions this iteration", closed_count)
             acct = self._executor.account
-            # ── Telegram: Closed positions ──
-            if self._bot:
-                closed_positions = [
-                    ClosedPositionData(
-                        market_id=p.market_id[:12],
-                        outcome=p.outcome,
-                        entry_price=p.avg_price,
-                        exit_price=0.0,  # approx
-                        realized_pnl=p.realized_pnl if hasattr(p, 'realized_pnl') else 0.0,
-                        close_reason=p.close_reason if hasattr(p, 'close_reason') else "tp_sl",
-                    )
-                    for p in acct.positions
-                    if p.status != "open"
-                ]
-                if closed_positions:
-                    closed_msg = format_closed_positions(closed_positions[:5])
-                    try:
-                        await self._bot.send_message(closed_msg)
-                    except Exception as e:
-                        logger.warning("Telegram closed positions failed: %s", e)
 
         # Mark-to-market P&L update
         price_lookup = {m.market_id: m.outcome_prices[0] for m in markets if m.outcome_prices}
@@ -801,24 +582,6 @@ class SimulationEngine:
             alert_msg = format_pnl_alert(summary, threshold_pct=5.0)
             if alert_msg:
                 await self._bot.send_message(alert_msg)
-
-        # ── Telegram: Cycle summary ──
-        if self._bot:
-            cycle_msg = format_cycle_summary(CycleSummaryData(
-                iteration=self._iteration,
-                markets_scanned=len(markets),
-                signals_generated=signals_this_round,
-                fills=fills_this_round,
-                rejections=rejections_this_round,
-                errors=len(self._iteration_errors),
-                portfolio_balance=acct.balance_usd,
-                open_positions=summary.num_open_positions,
-                unrealized_pnl=summary.unrealized_pnl,
-            ))
-            try:
-                await self._bot.send_message(cycle_msg)
-            except Exception as e:
-                logger.warning("Telegram cycle summary failed: %s", e)
 
         # Daily report at 20:00 UTC
         today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -1039,7 +802,6 @@ class SimulationEngine:
             estimated_prob=estimated_prob,
             balance_usd=self._executor.account.balance_usd,
             open_market_ids=self._open_market_ids(),
-            cash_available=self._executor.account.balance_usd,
         )
         if signal is None:
             # No edge found — HOLD
@@ -1069,20 +831,17 @@ class SimulationEngine:
             signal.size_usd,
         )
 
-        # Compute order book liquidity for risk check
-        book_liq_asks = sum(lvl.price * lvl.size for lvl in book.asks)
-        book_liq_bids = sum(lvl.price * lvl.size for lvl in book.bids)
-        # Total liquidity = both sides (conservative measure of book depth)
-        total_book_liquidity = book_liq_asks + book_liq_bids
-
         # Risk check (PRE-trade drawdown using projected balance)
+        # Compute order book liquidity for risk gate
+        book_liq_asks = sum(l.price * l.size for l in book.asks) if book.asks else 0
+        book_liq_bids = sum(l.price * l.size for l in book.bids) if book.bids else 0
         verdict, reason = self._risk.check(
             market_id=signal.market_id,
             outcome=signal.outcome,
             trade_usd=signal.size_usd,
             current_balance=self._executor.account.balance_usd,
             volume_usd=market.volume,
-            liquidity_usd=total_book_liquidity,
+            liquidity_usd=book_liq_asks + book_liq_bids,
         )
         if verdict != RiskVerdict.ALLOW:
             logger.info("⛔ Risk rejected: %s (%s)", verdict.value, reason)
@@ -1152,15 +911,14 @@ class SimulationEngine:
             decision_type = DecisionType.BUY_YES
 
         # Mapeamento SELL -> BUY NO está funcionando corretamente
-            order = OrderRequest(
-                market_id=signal.market_id,
-                side=side,
-                outcome=outcome,
-                price=price,
-                size=signal.size_usd / price if price > 0 else 0,
-                iteration=self._iteration,
-                end_date_iso=market.end_date_iso,
-            )
+        order = OrderRequest(
+            market_id=signal.market_id,
+            side=side,
+            outcome=outcome,
+            price=price,
+            size=signal.size_usd / price if price > 0 else 0,
+            iteration=self._iteration,
+        )
 
         fill = await self._executor.submit_order(order)
 
@@ -1262,105 +1020,8 @@ class SimulationEngine:
             self._log_audit(result)
             return result
 
-    # ── State Persistence ──────────────────────────────────────
-
-    def _save_state(self) -> None:
-        """Persist executor + risk controller state to disk.
-
-        Called every N iterations and on shutdown.
-        Atomic write: write to temp, then rename.
-        """
-        import json as _json
-        import tempfile as _tempfile
-
-        state = {
-            "version": 1,
-            "iteration": self._iteration,
-            "total_signals": self._total_signals,
-            "total_fills": self._total_fills,
-            "total_rejections": self._total_rejections,
-            "executor": self._executor.export_state(),
-            "risk": self._risk.export_state(),
-        }
-        try:
-            Path(self._state_file).parent.mkdir(parents=True, exist_ok=True)
-            payload = _json.dumps(state, indent=2, default=str)
-            fd, tmp_path = _tempfile.mkstemp(
-                dir=str(Path(self._state_file).parent),
-                suffix=".tmp",
-            )
-            try:
-                import os as _os
-                _os.write(fd, payload.encode("utf-8"))
-                _os.close(fd)
-                _os.replace(tmp_path, self._state_file)
-            except BaseException:
-                try:
-                    import os as _os
-                    _os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
-            logger.debug("💾 State saved (iter=%d, balance=$%.2f, positions=%d)",
-                         self._iteration,
-                         self._executor.account.balance_usd,
-                         len(self._executor.account.positions))
-        except Exception as exc:
-            logger.warning("⚠️ State save failed: %s", exc)
-
-    def _restore_state(self) -> bool:
-        """Restore executor + risk state from disk on startup.
-
-        Returns True if state was restored, False if no state file found.
-        """
-        import json as _json
-
-        state_path = Path(self._state_file)
-        if not state_path.exists():
-            logger.info("📂 No saved state found — starting fresh")
-            return False
-        try:
-            raw = state_path.read_text()
-            if not raw.strip():
-                logger.warning("📂 State file is empty — starting fresh")
-                return False
-            state = _json.loads(raw)
-            version = state.get("version", 0)
-            if version != 1:
-                logger.warning("📂 Unsupported state version %d — starting fresh", version)
-                return False
-
-            # Restore executor state
-            executor_state = state.get("executor", {})
-            if executor_state:
-                self._executor.import_state(executor_state)
-
-            # Restore risk controller state
-            risk_state = state.get("risk", {})
-            if risk_state:
-                self._risk.import_state(risk_state)
-
-            # Restore counters
-            self._iteration = state.get("iteration", 0)
-            self._total_signals = state.get("total_signals", 0)
-            self._total_fills = state.get("total_fills", 0)
-            self._total_rejections = state.get("total_rejections", 0)
-
-            acct = self._executor.account
-            logger.info(
-                "🔄 State restored: iter=%d balance=$%.2f positions=%d signals=%d fills=%d",
-                self._iteration, acct.balance_usd,
-                len(acct.positions), self._total_signals, self._total_fills,
-            )
-            return True
-        except Exception as exc:
-            logger.warning("⚠️ State restore failed: %s — starting fresh", exc)
-            return False
-
     async def _shutdown(self) -> None:
         """Graceful shutdown."""
-        # Final state save before exit
-        self._save_state()
         acct = self._executor.account
         logger.info(
             "🛑 Simulation stopped — iterations=%d signals=%d fills=%d rejections=%d balance=$%.2f",
