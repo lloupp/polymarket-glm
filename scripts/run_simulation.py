@@ -26,7 +26,7 @@ from polymarket_glm.config import Settings, ExecutionMode
 from polymarket_glm.ingestion.market_fetcher import MarketFetcher, MarketFilter
 from polymarket_glm.ingestion.price_feed import PriceFeed
 from polymarket_glm.strategy.signal_engine import SignalEngine, SignalType
-from polymarket_glm.strategy.llm_router import LLMRouter, LLMRouterRuntimeConfig as RouterConfig, LLMProviderConfig
+from polymarket_glm.strategy.scorer_dispatcher import ScorerDispatcher
 from polymarket_glm.strategy.context_fetcher import ContextBuilder, ContextBuilderConfig
 from polymarket_glm.risk.controller import RiskController, RiskVerdict
 from polymarket_glm.execution.paper_executor import PaperExecutor
@@ -75,65 +75,9 @@ class SimulationEngine:
         self._settlement = SettlementTracker()
         self._position_mgr = PositionManager(PositionManagerConfig())
 
-        # LLM Router (replaces Gaussian noise estimator)
-        self._llm_router: LLMRouter | None = None
-        self._use_llm = False
-        llm_cfg = settings.llm_router
-        if llm_cfg.enabled and llm_cfg.active_providers > 0:
-            providers = []
-            if llm_cfg.groq_api_key:
-                providers.append(LLMProviderConfig(
-                    name="groq", base_url=llm_cfg.groq_base_url,
-                    model=llm_cfg.groq_model, rpm=llm_cfg.groq_rpm,
-                    api_key=llm_cfg.groq_api_key, priority=1,
-                ))
-            if llm_cfg.gemini_api_key:
-                providers.append(LLMProviderConfig(
-                    name="gemini", base_url=llm_cfg.gemini_base_url,
-                    model=llm_cfg.gemini_model, rpm=llm_cfg.gemini_rpm, rpd=llm_cfg.gemini_rpd,
-                    api_key=llm_cfg.gemini_api_key, priority=2,
-                ))
-            if llm_cfg.github_api_key:
-                providers.append(LLMProviderConfig(
-                    name="github", base_url=llm_cfg.github_base_url,
-                    model=llm_cfg.github_model, rpm=llm_cfg.github_rpm,
-                    api_key=llm_cfg.github_api_key, priority=3,
-                ))
-            if llm_cfg.cerebras_api_key:
-                providers.append(LLMProviderConfig(
-                    name="cerebras", base_url=llm_cfg.cerebras_base_url,
-                    model=llm_cfg.cerebras_model, rpm=llm_cfg.cerebras_rpm,
-                    api_key=llm_cfg.cerebras_api_key, priority=4,
-                ))
-            if llm_cfg.mistral_api_key:
-                providers.append(LLMProviderConfig(
-                    name="mistral", base_url=llm_cfg.mistral_base_url,
-                    model=llm_cfg.mistral_model, rpm=llm_cfg.mistral_rpm,
-                    api_key=llm_cfg.mistral_api_key, priority=5,
-                ))
-            if llm_cfg.minimax_api_key:
-                providers.append(LLMProviderConfig(
-                    name="minimax", base_url=llm_cfg.minimax_base_url,
-                    model=llm_cfg.minimax_model, rpm=llm_cfg.minimax_rpm,
-                    api_key=llm_cfg.minimax_api_key, priority=0,
-                    enable_web_search=llm_cfg.minimax_enable_web_search,
-                ))
-
-            self._llm_router = LLMRouter(RouterConfig(
-                providers=providers,
-                max_retries_per_provider=llm_cfg.max_retries_per_provider,
-                timeout_sec=llm_cfg.timeout_sec,
-                temperature=llm_cfg.temperature,
-                max_tokens=llm_cfg.max_tokens,
-            ))
-            self._use_llm = True
-            logger.info(
-                "🧠 LLM Router enabled: %d providers (%s)",
-                len(providers),
-                ", ".join(p.name for p in providers),
-            )
-        else:
-            logger.info("📊 LLM Router disabled — using Gaussian noise estimator")
+        # Scorer Dispatcher (replaces LLM Router - deterministic scoring, no LLMs)
+        self._scorer_dispatcher = ScorerDispatcher()
+        logger.info("ScorerDispatcher enabled (weather + heuristic, no LLMs)")
 
         # Context Builder (News + Web Search for Superforecaster)
         context_cfg = ContextBuilderConfig(
@@ -706,94 +650,39 @@ class SimulationEngine:
             return result
 
         # ── Estimator ──
-        # Use LLM Router if available, otherwise fall back to Gaussian noise
-        llm_degraded = False
-        edge_source = "gaussian"
+        # Use ScorerDispatcher (deterministic, no LLMs)
+        edge_source = "scorer"
         confidence = None
-        news_context = ""
-        if self._use_llm and self._llm_router:
-            from polymarket_glm.strategy.estimator import MarketInfo
-            mi = MarketInfo(
-                question=market.question,
-                volume=market.volume,
-                spread=market.spread_bps / 10_000 if hasattr(market, 'spread_bps') else 0.05,
-                current_price=market.outcome_prices[0] if market.outcome_prices else 0.5,
-                category=getattr(market, "category", "") or "",
-            )
-            # Fetch news/search context for the Superforecaster prompt
-            if self._context_builder.has_any_source:
-                try:
-                    news_context = await self._context_builder.fetch_context(market.question)
-                    if news_context:
-                        logger.debug(
-                            "📡 Context fetched (%d chars) for: %s",
-                            len(news_context),
-                            market.question[:50],
-                        )
-                except Exception as exc:
-                    logger.debug("Context fetch failed for %s: %s", market.question[:30], exc)
-
-            if self._use_llm:
-                try:
-                    estimate = await self._llm_router.estimate(mi, news_context=news_context)
-                except Exception as exc:
-                    # LLM failure → degraded fallback to heuristic
-                    logger.warning("⚠️ LLM estimation failed: %s — falling back to heuristic", exc)
-                    llm_degraded = True
-                    import random
-                    base_prob = market.outcome_prices[0] if market.outcome_prices else 0.5
-                    estimated_prob = max(0.01, min(0.99, base_prob + random.gauss(0, 0.05)))
-                    edge_source = "degraded"
-                    confidence = 0.1  # minimum confidence for degraded mode
-                else:
-                    # Apply confidence penalty if no context was available
-                    if not news_context and self._context_builder.has_any_source:
-                        penalty = self._context_builder.confidence_penalty
-                        if penalty < 1.0:
-                            original_confidence = estimate.confidence
-                            estimate.confidence = original_confidence * penalty
-                            logger.info(
-                                "📉 No context — confidence penalty: %.2f → %.2f (%.0f%% reduction)",
-                                original_confidence, estimate.confidence,
-                                (1.0 - penalty) * 100,
-                            )
-                    estimated_prob = estimate.probability
-                    edge_source = estimate.source
-                    confidence = estimate.confidence
-                    logger.info(
-                        "🧠 LLM estimate: %.2f (confidence=%.2f, source=%s) — %s",
-                        estimated_prob, confidence, edge_source,
-                        market.question[:50],
-                    )
-                    # MiniMax-specific observability
-                    if estimate.web_search_summary:
-                        logger.info(
-                            "🔍 MiniMax: prob=%.2f confidence=%s reasoning=%s sources=%s",
-                            estimated_prob, estimate.confidence, estimate.reasoning[:80],
-                            estimate.web_search_summary[:80],
-                        )
-                    # Log fallback reason if applicable
-                    if "fallback" in edge_source or "low_confidence" in edge_source:
-                        logger.warning(
-                            "⚠️ Edge source fallback: %s — reason: %s",
-                            edge_source, estimate.reasoning[:100],
-                        )
-        else:
-            # Fallback: Gaussian noise estimator (for testing without LLM keys)
+        from polymarket_glm.strategy.estimator import MarketInfo
+        mi = MarketInfo(
+            question=market.question,
+            volume=market.volume,
+            spread=market.spread_bps / 10_000 if hasattr(market, 'spread_bps') else 0.05,
+            current_price=market.outcome_prices[0] if market.outcome_prices else 0.5,
+            category=getattr(market, "category", "") or "",
+            end_date=getattr(market, "end_date_iso", None),
+        )
+        try:
+            estimate = await self._scorer_dispatcher.estimate(mi)
+        except Exception as exc:
+            logger.warning("ScorerDispatcher failed: %s - falling back to heuristic", exc)
             import random
             base_prob = market.outcome_prices[0] if market.outcome_prices else 0.5
-            noise = random.gauss(0, 0.05)
-            estimated_prob = max(0.01, min(0.99, base_prob + noise))
-
-        # Compute llm_state for audit trail
-        if not self._use_llm:
-            llm_state = "heuristic_only"
-        elif llm_degraded:
-            llm_state = "degraded"
-        elif "fallback" in edge_source or "low_confidence" in edge_source:
-            llm_state = "degraded"
+            estimated_prob = max(0.01, min(0.99, base_prob + random.gauss(0, 0.05)))
+            edge_source = "degraded"
+            confidence = 0.1
         else:
-            llm_state = "normal"
+            estimated_prob = estimate.probability
+            edge_source = estimate.source
+            confidence = estimate.confidence
+            logger.info(
+                "Scorer estimate: %.2f (confidence=%.2f, source=%s) - %s",
+                estimated_prob, confidence, edge_source,
+                market.question[:50],
+            )
+
+        # Compute llm_state for audit trail (always scorer now)
+        llm_state = "scorer"
 
         # Generate signal
         signal = self._signal_engine.generate_signal(
