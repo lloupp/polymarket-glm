@@ -27,7 +27,6 @@ from polymarket_glm.ingestion.market_fetcher import MarketFetcher, MarketFilter
 from polymarket_glm.ingestion.price_feed import PriceFeed
 from polymarket_glm.strategy.signal_engine import SignalEngine, SignalType
 from polymarket_glm.strategy.scorer_dispatcher import ScorerDispatcher
-from polymarket_glm.strategy.context_fetcher import ContextBuilder, ContextBuilderConfig
 from polymarket_glm.risk.controller import RiskController, RiskVerdict
 from polymarket_glm.execution.paper_executor import PaperExecutor
 from polymarket_glm.execution.exchange import OrderRequest
@@ -79,39 +78,22 @@ class SimulationEngine:
         self._scorer_dispatcher = ScorerDispatcher()
         logger.info("ScorerDispatcher enabled (weather + heuristic, no LLMs)")
 
-        # Context Builder (News + Web Search for Superforecaster)
-        context_cfg = ContextBuilderConfig(
-            news_fetcher=settings.news_fetcher,
-            web_searcher=settings.web_searcher,
-        )
-        self._context_builder = ContextBuilder(context_cfg)
-        if self._context_builder.has_any_source:
-            sources = []
-            if settings.news_fetcher.api_key:
-                sources.append("NewsAPI")
-            if settings.web_searcher.api_key:
-                sources.append("Tavily")
-            logger.info(
-                "📡 Context Builder enabled: %s",
-                " + ".join(sources),
-            )
-        else:
-            logger.info("📡 Context Builder disabled — no news/search API keys")
-
         # Market filter: focus on crypto, geopolitics, tech, economics
         self._market_filter = MarketFilter(
             active_only=True,
             exclude_sports=True,
-            min_volume_usd=50000,
+            min_volume_usd=10000,
             max_markets=20,
-            keywords_include=[
-                "bitcoin", "btc", "ethereum", "eth ", "crypto", "solana",
-                "tariff", "fed", "interest rate", "recession", "gdp",
-                "inflation", "s&p", "stock", "dollar",
-                "china", "russia", "ukraine", "war", "ceasefire", "nato",
-                "ai ", "gpt", "launch", "airdrop", "market cap",
-                "regulation", "sec ", "deport", "trump tariff",
-            ],
+        keywords_include=[
+            "bitcoin", "btc", "ethereum", "eth ", "crypto", "solana",
+            "tariff", "fed", "interest rate", "recession", "gdp",
+            "inflation", "s&p", "stock", "dollar",
+            "china", "russia", "ukraine", "war", "ceasefire", "nato",
+            "ai ", "gpt", "launch", "airdrop", "market cap",
+            "regulation", "sec ", "deport", "trump tariff",
+            # Weather markets (routed to WeatherScorer)
+            "temperature", "precipitation", "rain", "snow", "weather",
+        ],
             keywords_exclude=[
                 "win the 2026 fifa", "win the 2026 nba", "win the 2025",
                 "la liga", "premier league", "champions league",
@@ -707,7 +689,7 @@ class SimulationEngine:
                 llm_state=llm_state,
                 portfolio_cash=cash, portfolio_positions_value=pos_val,
                 portfolio_total=total,
-                context_available=bool(news_context),
+                context_available=False,
             )
             self._log_audit(result)
             return result
@@ -750,7 +732,7 @@ class SimulationEngine:
                 risk_reason=reason,
                 portfolio_cash=cash, portfolio_positions_value=pos_val,
                 portfolio_total=total,
-                context_available=bool(news_context),
+                context_available=False,
             )
             self._log_audit(result)
             return result
@@ -781,7 +763,7 @@ class SimulationEngine:
                 risk_reason="OK",
                 portfolio_cash=cash, portfolio_positions_value=pos_val,
                 portfolio_total=total,
-                context_available=bool(news_context),
+                context_available=False,
             )
             self._log_audit(result)
             return result
@@ -864,7 +846,7 @@ class SimulationEngine:
                 risk_reason="OK",
                 portfolio_cash=cash, portfolio_positions_value=pos_val,
                 portfolio_total=total,
-                context_available=bool(news_context),
+                context_available=False,
             )
             self._log_audit(result)
 
@@ -904,7 +886,7 @@ class SimulationEngine:
                 risk_reason="OK",
                 portfolio_cash=cash, portfolio_positions_value=pos_val,
                 portfolio_total=total,
-                context_available=bool(news_context),
+                context_available=False,
             )
             self._log_audit(result)
             return result
