@@ -183,8 +183,9 @@ class TestSettingsLiveGate:
 
     def test_conservative_defaults(self):
         """RiskConfig should have conservative simulation defaults."""
-        s = Settings()
+        s = Settings(_env_file=None)  # ignore .env overrides
         assert s.risk.max_total_exposure_usd == 500.0
         assert s.risk.max_per_trade_usd == 50.0
         assert s.risk.daily_loss_limit_usd == 30.0
         assert s.risk.drawdown_circuit_breaker_pct == 0.10
+

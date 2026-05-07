@@ -236,10 +236,9 @@ class SimulationEngine:
         )
 
         # Start Telegram bot polling in parallel
+        # NOTE: polling disabled when another bot (Hermes) uses the same token
+        # to avoid 409 Conflict. Alerts via POST still work fine.
         bot_task = None
-        if self._bot:
-            from polymarket_glm.ops.telegram_bot import parse_command
-            bot_task = asyncio.create_task(self._run_bot_polling())
 
         try:
             while not self._stop_event.is_set():
