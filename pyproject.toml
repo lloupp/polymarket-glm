@@ -27,7 +27,6 @@ dev = [
 pglm = "polymarket_glm.interface.cli:main"
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]

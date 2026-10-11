@@ -9,9 +9,53 @@ Implements ExchangeClient protocol with:
 from __future__ import annotations
 
 import logging
+import sys
+import types
 import uuid
+from dataclasses import dataclass
 
-from py_clob_client.clob_types import ApiCreds, OrderArgs, OpenOrderParams
+try:
+    from py_clob_client.clob_types import ApiCreds, OrderArgs, OpenOrderParams
+except ImportError:
+    @dataclass
+    class ApiCreds:
+        api_key: str | None
+        api_secret: str | None
+        api_passphrase: str | None
+
+    @dataclass
+    class OrderArgs:
+        token_id: str
+        price: float
+        size: float
+        side: str
+
+    @dataclass
+    class OpenOrderParams:
+        market: str | None = None
+
+    class _MissingClobClient:
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "py-clob-client is required for live trading. "
+                "Install with: pip install py-clob-client"
+            )
+
+    _py_clob_client = sys.modules.setdefault("py_clob_client", types.ModuleType("py_clob_client"))
+    _client_module = sys.modules.setdefault(
+        "py_clob_client.client",
+        types.ModuleType("py_clob_client.client"),
+    )
+    _types_module = sys.modules.setdefault(
+        "py_clob_client.clob_types",
+        types.ModuleType("py_clob_client.clob_types"),
+    )
+    _client_module.ClobClient = _MissingClobClient
+    _types_module.ApiCreds = ApiCreds
+    _types_module.OrderArgs = OrderArgs
+    _types_module.OpenOrderParams = OpenOrderParams
+    _py_clob_client.client = _client_module
+    _py_clob_client.clob_types = _types_module
 
 from polymarket_glm.config import ClobConfig
 from polymarket_glm.execution.exchange import (
